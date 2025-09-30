@@ -1,17 +1,22 @@
 import os
 import json
 import logging
-import time 
+import time
+import datetime # For current year in footer
 from dotenv import load_dotenv # type: ignore # Used for loading the Flask secret key
-from flask import Flask, request, render_template, send_from_directory, flash, redirect, url_for, make_response
+from flask import Flask, request, render_template, send_from_directory, flash, make_response
 from PIL import Image, UnidentifiedImageError
 import pytesseract
-from fpdf import FPDF 
+from fpdf import FPDF
 import fitz  # type: ignore
 
 # 🚀 NEW: Import the Limiter extension
 from flask_limiter import Limiter # type: ignore
 from flask_limiter.util import get_remote_address # type: ignore
+
+# 🚀 NEW: Import libraries for text processing
+from langdetect import detect, LangDetectException # type: ignore
+from spellchecker import SpellChecker # type: ignore
 
 # --- CONFIGURATION & INITIALIZATION ---
 
@@ -51,12 +56,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # 🚀 NEW: Initialize Flask-Limiter
-# This uses the IP address to track limits. It defaults to a memory store.
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
     default_limits=["200 per day", "50 per hour"] # Global default limit (optional)
 )
+
+
+# 🚀 NEW: Global SpellChecker instance (loads the dictionary once)
+spell = SpellChecker()
 
 
 # --- UTILITIES ---
@@ -70,13 +78,13 @@ def cleanup_old_files():
     """Deletes files in the upload folder older than CLEANUP_AGE_SECONDS."""
     now = time.time()
     deleted_count = 0
-    
+
     for filename in os.listdir(app.config['UPLOAD_FOLDER']):
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        
+
         if os.path.isdir(filepath):
             continue
-            
+
         file_mod_time = os.path.getmtime(filepath)
         if (now - file_mod_time) > CLEANUP_AGE_SECONDS:
             try:
@@ -84,40 +92,111 @@ def cleanup_old_files():
                 deleted_count += 1
             except OSError as e:
                 logger.error(f"Error deleting old file {filename}: {e}")
-                
+
     if deleted_count > 0:
         logger.info(f"Cleanup: Deleted {deleted_count} old files.")
 
+
+def process_text_for_ocr(doc_path):
+    """
+    Helper to extract a small text sample for language detection.
+    This uses a low-res rendering of the first page for speed.
+    """
+    try:
+        ext = os.path.splitext(doc_path)[1].lower()
+        if ext in ('.pdf', '.tif', '.tiff'):
+            doc = fitz.open(doc_path)
+            if doc.page_count > 0:
+                page = doc.load_page(0)
+                # Render low-res pixmap (e.g., 75 DPI) to save time
+                pix = page.get_pixmap(dpi=75)
+                pil_image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                doc.close()
+                return pytesseract.image_to_string(pil_image)
+            doc.close()
+            return ""
+        else:
+            return pytesseract.image_to_string(Image.open(doc_path))
+    except Exception as e:
+        logger.warning(f"Error extracting text sample for detection: {e}")
+        return ""
+
+
 def perform_ocr(image_path, lang, psm):
-    """Perform OCR on the file and return the text."""
+    """Perform OCR, Language Detection, and Spell Check on the file and return the text."""
     try:
         if not TESSERACT_OK:
             raise pytesseract.TesseractNotFoundError("Tesseract not available.")
 
-        config = f'--oem 3 --psm {psm}'
+        # --- 🚀 STEP 1: Automatic Language Detection ---
+        if lang == 'detect':
+            sample_text = process_text_for_ocr(image_path)
+            if sample_text:
+                try:
+                    # 'detect' returns a 2-letter code (e.g., 'en', 'fr')
+                    detected_lang = detect(sample_text)
+                    # Use 'eng' for English, or the 2/3-letter code for others
+                    lang = 'eng' if detected_lang == 'en' else detected_lang
+                    logger.info(f"Language auto-detected as: {lang}")
+                except LangDetectException:
+                    lang = 'eng' # Default to English if detection fails
+                    logger.warning("Language detection failed, defaulting to 'eng'")
+            else:
+                lang = 'eng'
+
+        # Set Tesseract config, including the determined language
+        config = f'--oem 3 --psm {psm} -l {lang}'
         
+        # --- STEP 2: Perform OCR (Multi-page handled by fitz) ---
         ext = os.path.splitext(image_path)[1].lower()
+        full_text = []
+
         if ext in ('.pdf', '.tif', '.tiff'):
             doc = fitz.open(image_path)
-            full_text = []
             for i, page in enumerate(doc):
                 pix = page.get_pixmap(dpi=300) 
                 pil_image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                text = pytesseract.image_to_string(pil_image, lang=lang, config=config)
                 
+                # Perform OCR on this page
+                page_text = pytesseract.image_to_string(pil_image, config=config)
+                
+                # Add separator and text
                 if full_text:
                     full_text.append(
                         "\n======================================================\n"
                         f"--- PAGE {i + 1} of {doc.page_count} ---\n"
                         "======================================================\n\n"
                     )
-                full_text.append(text)
+                full_text.append(page_text)
             doc.close()
-            text = "".join(full_text)
+            ocr_result = "".join(full_text)
         else:
-            text = pytesseract.image_to_string(Image.open(image_path), lang=lang, config=config)
+            # Single-page image
+            ocr_result = pytesseract.image_to_string(Image.open(image_path), config=config)
         
-        return text.strip()
+        # --- 🚀 STEP 3: Post-OCR Spell Checking ---
+        
+        # Tokenize the text into words
+        # Note: spell.split_words handles splitting by whitespace and preserving punctuation
+        words = spell.split_words(ocr_result)
+        
+        # Find words that are misspelled
+        misspelled = spell.unknown(words)
+        
+        cleaned_words = []
+        for word in words:
+            if word in misspelled:
+                # Get the most likely correction
+                correction = spell.correction(word)
+                # Use correction, or original if none found
+                cleaned_words.append(correction or word) 
+            else:
+                cleaned_words.append(word)
+
+        # Reconstruct the text (using simple join for now)
+        final_text = " ".join(cleaned_words).strip()
+        
+        return final_text
 
     except pytesseract.TesseractNotFoundError as e:
         logger.error(f"Tesseract Error (Not Found): {e}")
@@ -129,7 +208,7 @@ def perform_ocr(image_path, lang, psm):
         logger.error(f"Tesseract Runtime Error: {error_msg}")
         
         if 'Failed loading language' in error_msg:
-            flash(f"OCR failed: Tesseract language pack '{lang}' is missing. Please install it.", 'error')
+            flash(f"OCR failed: Tesseract language pack '{lang}' is missing. Please install it (e.g., install '{lang}.traineddata').", 'error')
         elif 'Error opening data file' in error_msg:
             flash("OCR failed: Tesseract data files are missing or inaccessible.", 'error')
         else:
@@ -140,7 +219,7 @@ def perform_ocr(image_path, lang, psm):
         logger.error(f"Image Error: {e}")
         flash("OCR failed: Could not open file. Ensure it is a valid image/PDF file.", 'error') 
         return None
-
+        
     except Exception as e:
         logger.error(f"Unclassified OCR Processing Error: {e}")
         flash(f'An unexpected error occurred during OCR: {e}', 'error')
@@ -157,12 +236,14 @@ def before_request():
 @app.route('/', methods=['GET'])
 def index():
     """Renders the main HTML page."""
+    current_year = datetime.date.today().year
     return render_template(
         'index.html',
         tesseract_ok=TESSERACT_OK,
         tesseract_status=TESSERACT_STATUS,
         last_language=request.cookies.get('last_language', 'eng'),
-        last_pdf_title=request.cookies.get('last_pdf_title', '')
+        last_pdf_title=request.cookies.get('last_pdf_title', ''),
+        current_year=current_year # Pass current_year to template
     )
 
 @app.route('/uploads/<filename>')
@@ -171,11 +252,10 @@ def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 @app.route('/upload', methods=['POST'])
-# 🚀 NEW: Apply a specific rate limit to the high-resource route
+# 🚀 Apply a specific rate limit to the high-resource route
 @limiter.limit("5 per minute; 30 per hour", override_defaults=True)
 def upload_file():
     """Handles file upload, performs OCR, and prepares the image preview."""
-    # ... (File handling and OCR logic remains the same) ...
     
     if not TESSERACT_OK:
         flash('OCR failed: Tesseract is not installed or configured.', 'error')
@@ -259,10 +339,8 @@ def upload_file():
         return "Server Error", 500
 
 
-# The /generate_pdf route does not require an update as it is low-resource
 @app.route('/generate_pdf', methods=['POST'])
 def generate_pdf():
-    # ... (PDF generation logic remains the same) ...
     edited_text = request.form.get('edited_text')
     download_name = request.form.get('download_name', 'scanned_document.pdf')
     pdf_font = request.form.get('pdf_font', 'Arial')
@@ -315,7 +393,7 @@ def generate_pdf():
                 pdf.multi_cell(0, 5, content) 
 
         pdf_output = pdf.output(dest='S').encode('latin-1')
-        
+
         response = make_response(pdf_output)
         response.headers['Content-Type'] = 'application/pdf'
         response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
