@@ -1,13 +1,36 @@
-
-# Virtual environment
+# --------------------
+# PYTHON & VIRTUAL ENV
+# --------------------
+# Virtual environment directory
 venv/
+.venv/
+
+# Byte-compiled files
 *.pyc
-.env
-.app.py
-
-# IDE files
-.vscode/
-
-# Temporary files
 __pycache__/
+
+# --------------------
+# SECRETS AND CONFIG
+# --------------------
+# Local environment variables containing secrets (CRITICAL to exclude)
+.env
+
+# --------------------
+# APPLICATION SPECIFIC
+# --------------------
+# Exclude the temporary uploads folder used by the application
 uploads/
+
+
+# --------------------
+# CODE MISTAKE FIXES
+# --------------------
+# ⚠️ FIX: DO NOT exclude your main application code!
+# The entry: .app.py was removed
+
+# --------------------
+# IDE & EDITOR FILES
+# --------------------
+# VS Code settings and local history
+.vscode/
+.history/
