@@ -6,7 +6,7 @@ from flask import Flask, request, render_template, send_from_directory, flash, r
 from PIL import Image, UnidentifiedImageError
 import pytesseract
 from fpdf import FPDF
-import fitz # 🚀 NEW/FIX: PyMuPDF library for robust PDF/TIFF processing (imported as fitz)
+import fitz # type: ignore # 🚀 NEW/FIX: PyMuPDF library for robust PDF/TIFF processing (imported as fitz)
 
 # --- CONFIGURATION ---
 UPLOAD_FOLDER = 'uploads'
