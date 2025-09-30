@@ -15,10 +15,9 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv() 
 
-# --- Configuration & Tesseract Status Check ---
+# --- Configuration & Tesseract Status Check (FIXED LOGIC) ---
 
 # 1. Use environment variable for the primary Tesseract path
-# This is much cleaner and allows easy configuration
 TESSERACT_PRIMARY_PATH = os.environ.get('TESSERACT_CMD') 
 
 # Define fallback paths
@@ -34,6 +33,7 @@ TESSERACT_FALLBACK_PATHS = [
 # Check for Tesseract installation and set the command path
 tesseract_found = False
 tesseract_status_msg = "Tesseract Not Found. OCR will fail."
+final_tesseract_path = None
 
 # Filter out None values and duplicates before checking paths
 unique_paths = list(filter(None, set(TESSERACT_FALLBACK_PATHS)))
@@ -43,15 +43,21 @@ for path in unique_paths:
         pytesseract.pytesseract.tesseract_cmd = path
         tesseract_found = True
         tesseract_status_msg = f"Tesseract Found. Path: {path}"
+        final_tesseract_path = path
         break
-
-if not tesseract_found and TESSERACT_PRIMARY_PATH:
-    # Set the command to the primary path, even if not found, 
-    # so pytesseract can generate a TesseractNotFoundError on its own
+        
+# --- REFINED LOGIC: Only set tesseract_cmd if found, or if TESSERACT_CMD was specified (to allow TesseractNotFoundError to be raised later) ---
+if tesseract_found:
+    pytesseract.pytesseract.tesseract_cmd = final_tesseract_path
+elif TESSERACT_PRIMARY_PATH:
+    # Set the path to the user-specified one, even if it doesn't exist.
+    # This allows pytesseract to fail gracefully inside the try/except block.
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_PRIMARY_PATH
-elif not tesseract_found and unique_paths:
-    # If primary path wasn't set, use the first path to allow the error to surface
-    pytesseract.pytesseract.tesseract_cmd = unique_paths[0]
+else:
+    # Set a common default path if no path was found anywhere, to prevent the app from halting
+    # if pytesseract.pytesseract.tesseract_cmd is accessed before checking tesseract_found.
+    # The 'tesseract_found' flag handles the real error messaging.
+    pytesseract.pytesseract.tesseract_cmd = 'tesseract'
 
 
 app = Flask(__name__)
@@ -113,6 +119,7 @@ def upload_file():
         flash('No selected file.', 'error')
         return 'No selected file', 400
     
+    # Reset cursor and check file size
     file.seek(0, os.SEEK_END)
     file_size = file.tell()
     file.seek(0)
@@ -126,6 +133,7 @@ def upload_file():
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         
+        # Clean up old files in the upload folder
         for existing_file in os.listdir(app.config['UPLOAD_FOLDER']):
             os.remove(os.path.join(app.config['UPLOAD_FOLDER'], existing_file))
             
@@ -157,7 +165,8 @@ def upload_file():
             return jsonify({'text': extracted_text, 'filename': filename}), 200
 
         except TesseractNotFoundError:
-            error_msg = f"Tesseract not found. Path: {pytesseract.pytesseract.tesseract_cmd}"
+            # This should only happen if the environment variable path was wrong but Tesseract wasn't found in fallback
+            error_msg = f"Tesseract not found. Path: {pytesseract.pytesseract.tesseract_cmd}. Check your .env file."
             flash(error_msg, 'error')
             return error_msg, 500 
             
@@ -191,7 +200,11 @@ def generate_pdf():
         pdf.add_page()
         # Use the dynamically selected font
         pdf.set_font(pdf_font, size=12)
-        pdf.multi_cell(0, 10, edited_text.encode('latin-1', 'replace').decode('latin-1'), align='J') 
+        
+        # Ensure encoding handles common characters for fpdf
+        safe_text = edited_text.encode('latin-1', 'replace').decode('latin-1')
+        
+        pdf.multi_cell(0, 10, safe_text, align='J') 
 
         pdf_output = pdf.output(dest='S').encode('latin-1')
         

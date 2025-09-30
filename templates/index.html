@@ -87,6 +87,12 @@
         #pdfBtn { background-color: #28a745; color: white; display: none; }
         #pdfBtn:hover { background-color: #1e7e34; }
         
+        /* NEW: Local Storage Buttons */
+        #saveTextBtn { background-color: #ffc107; color: #343a40; margin-top: 10px; width: 100%; padding: 8px; }
+        #saveTextBtn:hover { background-color: #e0a800; }
+        .local-file-actions { display: flex; gap: 5px; margin-top: 5px;}
+        .local-file-actions button { flex-grow: 1; padding: 5px; font-size: 0.8em; }
+
         .loading { color: #007bff; margin-top: 10px; font-weight: bold; display: none; }
 
         /* --- Tesseract Status --- */
@@ -103,7 +109,7 @@
         /* --- Flashed Messages --- */
         .alert { padding: 15px; margin-bottom: 20px; border-radius: 4px; font-weight: 500; }
         .alert-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .alert-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .alert-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6fb; }
         .alert-warning { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
 
         /* --- Image Viewer --- */
@@ -114,6 +120,30 @@
             border: 1px solid #ddd; 
             padding: 5px;
             border-radius: 4px;
+        }
+
+        /* NEW: Local Storage List */
+        #savedFilesList {
+            list-style: none;
+            padding: 0;
+            max-height: 250px;
+            overflow-y: auto;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+        }
+        #savedFilesList li {
+            padding: 8px 10px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #savedFilesList li:last-child { border-bottom: none; }
+        .file-name {
+            flex-grow: 1;
+            font-size: 0.9em;
+            color: #1f4287;
+            cursor: pointer;
         }
     </style>
 </head>
@@ -170,6 +200,18 @@
             <div class="loading" id="loadingMessage">Processing document... This may take a moment for multi-page files.</div>
 
             <hr style="margin-top: 20px;">
+
+            <h2>Local Document Storage (Browser)</h2>
+            <div class="input-group">
+                <label for="localFileName">Save Document Name (Current Text)</label>
+                <input type="text" id="localFileName" placeholder="Enter name for local save">
+            </div>
+            <button id="saveTextBtn">Save Current Text Locally</button>
+            <p style="font-size: 0.85em; color: #777; margin-top: 5px;">*Saved only in this browser.</p>
+            
+            <ul id="savedFilesList">
+                </ul>
+            <hr>
             
             <h2>PDF Output</h2>
             
@@ -185,7 +227,7 @@
             <div class="input-group">
                 <label for="pdfTitle">PDF Document Title (e.g., Invoice-2024)</label>
                 <input type="text" id="pdfTitle" placeholder="Enter desired filename" 
-                       value="{{ last_pdf_title }}">
+                        value="{{ last_pdf_title }}">
             </div>
             <div class="button-group">
                 <button id="pdfBtn">5. Download Final PDF</button>
@@ -208,11 +250,103 @@
     </div>
 
     <script>
-        // Set the max file size based on the backend limit (5 MB) for client-side check
+        const STORAGE_KEY = 'ocr_saved_documents';
         const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; 
         const fileInput = document.getElementById('imageFile');
+        const ocrTextarea = document.getElementById('ocrText');
+        const pdfButton = document.getElementById('pdfBtn');
+        const loadingMessage = document.getElementById('loadingMessage');
+        const imageElement = document.getElementById('scannedImage');
+        const savedFilesList = document.getElementById('savedFilesList');
+        const localFileNameInput = document.getElementById('localFileName');
 
-        // --- Client-Side File Size Validation ---
+
+        // --- Utility Function: Render Saved Files List ---
+        function renderSavedFiles() {
+            savedFilesList.innerHTML = '';
+            const savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+            
+            if (savedData.length === 0) {
+                savedFilesList.innerHTML = '<li style="color: #777;">No documents saved locally.</li>';
+                return;
+            }
+
+            savedData.forEach(item => {
+                const li = document.createElement('li');
+                const timestamp = new Date(item.timestamp).toLocaleString();
+                
+                li.innerHTML = `
+                    <span class="file-name" data-id="${item.timestamp}" title="Click to Load Text">${item.name} (${timestamp})</span>
+                    <div class="local-file-actions">
+                        <button class="btn btn-sm" onclick="loadText('${item.timestamp}')" style="background-color: #007bff; color: white;">Load</button>
+                        <button class="btn btn-sm" onclick="deleteText('${item.timestamp}')" style="background-color: #dc3545; color: white;">Delete</button>
+                    </div>
+                `;
+                savedFilesList.appendChild(li);
+            });
+        }
+
+        // --- Local Storage Functions ---
+        window.loadText = function(timestamp) {
+            const savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+            const item = savedData.find(doc => doc.timestamp === timestamp);
+
+            if (item && confirm(`Load "${item.name}" into the editor? Current text will be lost.`)) {
+                ocrTextarea.value = item.text;
+                ocrTextarea.disabled = false;
+                pdfButton.style.display = 'block';
+                document.getElementById('pdfTitle').value = item.name;
+                alert(`Document "${item.name}" loaded for editing.`);
+            }
+        };
+
+        window.deleteText = function(timestamp) {
+            if (confirm("Are you sure you want to permanently delete this document from your browser's local storage?")) {
+                let savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+                const originalLength = savedData.length;
+                
+                savedData = savedData.filter(doc => doc.timestamp !== timestamp);
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(savedData));
+
+                if (savedData.length < originalLength) {
+                    alert('Document deleted successfully.');
+                    renderSavedFiles();
+                }
+            }
+        };
+        
+        document.getElementById('saveTextBtn').addEventListener('click', () => {
+            const textToSave = ocrTextarea.value;
+            let fileName = localFileNameInput.value.trim() || 'Untitled Document';
+
+            if (!textToSave.trim()) {
+                alert('The text editor is empty. Nothing to save.');
+                return;
+            }
+
+            // Get existing data or initialize array
+            const savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+            
+            // Create new data object
+            const newDoc = {
+                name: fileName,
+                text: textToSave,
+                timestamp: Date.now().toString()
+            };
+
+            // Add to array and save back to localStorage
+            savedData.push(newDoc);
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(savedData));
+
+            alert(`Text saved locally as "${fileName}".`);
+            localFileNameInput.value = '';
+            renderSavedFiles();
+        });
+
+
+        // --- OCR & PDF Processing (Existing Logic with Minor UI Tweaks) ---
+
+        // Client-Side File Size Validation
         fileInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (file && file.size > MAX_FILE_SIZE_BYTES) {
@@ -223,13 +357,8 @@
 
         document.getElementById('uploadBtn').addEventListener('click', async () => {
             const file = fileInput.files[0];
-            const ocrTextarea = document.getElementById('ocrText');
-            const pdfButton = document.getElementById('pdfBtn');
-            const loadingMessage = document.getElementById('loadingMessage');
-            const imageElement = document.getElementById('scannedImage');
-            
             const language = document.getElementById('ocrLang').value;
-            const psm = document.getElementById('ocrPsm').value; // Get PSM value
+            const psm = document.getElementById('ocrPsm').value; 
 
             if (!file) {
                 alert('Please select a document file first.');
@@ -246,7 +375,7 @@
             const formData = new FormData();
             formData.append('file', file);
             formData.append('language', language);
-            formData.append('psm', psm); // Add PSM to form data
+            formData.append('psm', psm);
 
             try {
                 const response = await fetch('/upload', {
@@ -264,19 +393,13 @@
                     // Display the image (shows the first page)
                     imageElement.src = '/uploads/' + data.filename;
                     imageElement.style.display = 'block';
+                    document.getElementById('pdfTitle').value = data.filename.split('.').slice(0, -1).join('.'); // Set title from filename
 
                 } else {
                     const error = await response.text();
                     
-                    if (response.status === 413) {
-                        alert('Upload Failed (File Size Limit): ' + error);
-                    } else if (response.status === 503) {
-                        alert('Server Unavailable: Tesseract is not configured.');
-                    } else if (response.status === 500) {
-                        alert('Server Error (OCR): ' + error);
-                    } else {
-                        alert('An unknown error occurred: ' + error);
-                    }
+                    // Error handling logic (kept concise)
+                    alert('OCR processing failed. Check flash message for details.');
                     ocrTextarea.value = 'Processing failed. See flash message for details.';
                 }
             } catch (error) {
@@ -288,9 +411,9 @@
         });
 
         document.getElementById('pdfBtn').addEventListener('click', async () => {
-            const editedText = document.getElementById('ocrText').value;
+            const editedText = ocrTextarea.value;
             const pdfTitleInput = document.getElementById('pdfTitle').value.trim();
-            const pdfFont = document.getElementById('pdfFont').value; // Get Font value
+            const pdfFont = document.getElementById('pdfFont').value;
             
             let downloadName = pdfTitleInput || 'scanned_document';
             downloadName = downloadName.endsWith('.pdf') ? downloadName : downloadName + '.pdf';
@@ -305,29 +428,35 @@
             tempForm.method = 'POST';
             tempForm.action = '/generate_pdf';
 
+            // Hidden input for edited text
             const input_text = document.createElement('input');
             input_text.type = 'hidden';
             input_text.name = 'edited_text';
             input_text.value = editedText;
 
+            // Hidden input for download name
             const input_title = document.createElement('input');
             input_title.type = 'hidden';
             input_title.name = 'download_name';
             input_title.value = downloadName;
             
-            const input_font = document.createElement('input'); // Font field
+            // Hidden input for font selection
+            const input_font = document.createElement('input');
             input_font.type = 'hidden';
             input_font.name = 'pdf_font';
             input_font.value = pdfFont;
 
             tempForm.appendChild(input_text);
             tempForm.appendChild(input_title);
-            tempForm.appendChild(input_font); // Append font
+            tempForm.appendChild(input_font); 
 
             document.body.appendChild(tempForm);
             tempForm.submit();
             document.body.removeChild(tempForm);
         });
+
+        // Initialize the saved files list on page load
+        document.addEventListener('DOMContentLoaded', renderSavedFiles);
 
     </script>
 </body>

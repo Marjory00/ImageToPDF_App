@@ -2,6 +2,8 @@
 # Virtual environment
 venv/
 *.pyc
+.env
+.app.py
 
 # IDE files
 .vscode/
