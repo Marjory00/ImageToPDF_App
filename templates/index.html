@@ -82,7 +82,7 @@
             font-weight: bold; 
             transition: background-color 0.2s; 
         }
-        /* Style for the new "Scan More" button */
+        /* Style for scan buttons */
         #uploadBtn { 
             background-color: #007bff; 
             color: white; 
@@ -91,13 +91,12 @@
         }
         #uploadBtn:hover { background-color: #0056b3; }
 
-        /* The separate button for scanning subsequent images */
         #scanNextBtn {
             background-color: #17a2b8; /* Info blue/cyan */
             color: white;
             width: 100%;
             margin-top: 5px;
-            display: none; /* Hidden until first scan completes */
+            display: none; 
         }
         #scanNextBtn:hover { background-color: #138496; }
 
@@ -118,7 +117,7 @@
             border-radius: 4px;
             font-size: 0.9em;
             margin-bottom: 15px;
-            word-wrap: break-word; /* Allows long paths to wrap */
+            word-wrap: break-word; 
         }
         .status-ok { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
         .status-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6fb; }
@@ -130,16 +129,43 @@
         .alert-warning { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
 
         /* --- Image Viewer --- */
-        #scannedImage { 
-            max-width: 100%; 
-            max-height: 400px; 
-            display: none; 
-            border: 1px solid #ddd; 
-            padding: 5px;
+        #imageWrapper {
+            overflow: auto; /* Allows scrolling when zoomed in */
+            max-height: 500px; /* Limit height for better layout */
+            border: 1px solid #ddd;
             border-radius: 4px;
+            padding: 5px;
+            text-align: center;
+            background-color: #f9f9f9;
         }
 
-        /* Local Storage List */
+        #scannedImage { 
+            max-width: 100%; 
+            display: none; 
+            /* Start with no explicit style override, let wrapper handle sizing */
+            transform-origin: top left;
+        }
+        
+        .zoom-controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .zoom-controls button {
+            padding: 8px 15px;
+            font-size: 1.1em;
+            background-color: #6c757d;
+            color: white;
+            width: auto;
+            border-radius: 4px;
+        }
+        .zoom-controls button:hover {
+            background-color: #5a6268;
+        }
+
+
+        /* Local Storage List styles (omitted for brevity, assume they are correct) */
         #savedFilesList {
             list-style: none;
             padding: 0;
@@ -256,8 +282,13 @@
         <div class="main-content">
             <div class="section-panel">
                 <h2>Document Viewer (Page 1 Preview)</h2>
-                <div id="imageDisplayArea" style="text-align: center;">
+                <div id="imageWrapper">
                     <img id="scannedImage" alt="Scanned Document Preview">
+                </div>
+                <div class="zoom-controls">
+                    <button id="zoomInBtn" title="Zoom In">+</button>
+                    <button id="zoomOutBtn" title="Zoom Out">-</button>
+                    <button id="zoomResetBtn" title="Reset Zoom">Reset</button>
                 </div>
             </div>
 
@@ -279,16 +310,62 @@
         const savedFilesList = document.getElementById('savedFilesList');
         const localFileNameInput = document.getElementById('localFileName');
         
-        // NEW: Track the current page count for multi-scan
         let currentPageCount = 0; 
         const uploadBtn = document.getElementById('uploadBtn');
         const scanNextBtn = document.getElementById('scanNextBtn');
+        
+        // NEW: Zoom variables
+        const zoomInBtn = document.getElementById('zoomInBtn');
+        const zoomOutBtn = document.getElementById('zoomOutBtn');
+        const zoomResetBtn = document.getElementById('zoomResetBtn');
+        let currentZoom = 1.0;
+        const zoomStep = 0.2;
+        const minZoom = 0.5;
+        const maxZoom = 5.0;
 
 
-        // --- Utility Function: Render Saved Files List ---
+        // --- NEW: Zoom Functions ---
+        function applyZoom() {
+            // Apply zoom using CSS transform: scale() for smooth scaling
+            imageElement.style.transform = `scale(${currentZoom})`;
+            
+            // Adjust max-width based on zoom to allow it to exceed 100% and enable scrolling
+            if (currentZoom > 1.0) {
+                imageElement.style.maxWidth = `${currentZoom * 100}%`;
+            } else {
+                imageElement.style.maxWidth = '100%';
+            }
+        }
+
+        zoomInBtn.addEventListener('click', () => {
+            if (currentZoom < maxZoom) {
+                currentZoom = Math.min(maxZoom, currentZoom + zoomStep);
+                applyZoom();
+            }
+        });
+
+        zoomOutBtn.addEventListener('click', () => {
+            if (currentZoom > minZoom) {
+                currentZoom = Math.max(minZoom, currentZoom - zoomStep);
+                applyZoom();
+            }
+        });
+
+        zoomResetBtn.addEventListener('click', () => {
+            currentZoom = 1.0;
+            applyZoom();
+        });
+
+        // Reset zoom whenever a new image is loaded
+        imageElement.addEventListener('load', () => {
+            currentZoom = 1.0;
+            applyZoom();
+        });
+
+
+        // --- Utility Function: Render Saved Files List (omitted body for brevity) ---
         function renderSavedFiles() {
             savedFilesList.innerHTML = '';
-            // Use try-catch for safe JSON parsing
             let savedData;
             try {
                 savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
@@ -317,7 +394,7 @@
             });
         }
 
-        // --- Local Storage Functions (made global for onclick) ---
+        // --- Local Storage Functions (kept for context) ---
         window.loadText = function(timestamp) {
             const savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
             const item = savedData.find(doc => doc.timestamp === timestamp);
@@ -326,10 +403,8 @@
                 ocrTextarea.value = item.text;
                 ocrTextarea.disabled = false;
                 pdfButton.style.display = 'block';
-                document.getElementById('pdfTitle').value = item.name.replace(/\s*\(.*\)$/, ''); // Clean up name for PDF title
+                document.getElementById('pdfTitle').value = item.name.replace(/\s*\(.*\)$/, ''); 
                 
-                // When loading from local storage, we can't determine the image or page count easily, 
-                // so reset the count and allow future scans to append.
                 currentPageCount = 0; 
                 scanNextBtn.style.display = 'block';
                 
@@ -361,17 +436,13 @@
                 return;
             }
 
-            // Get existing data or initialize array
             const savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-            
-            // Create new data object
             const newDoc = {
                 name: fileName,
                 text: textToSave,
                 timestamp: Date.now().toString()
             };
 
-            // Add to array and save back to localStorage
             savedData.push(newDoc);
             localStorage.setItem(STORAGE_KEY, JSON.stringify(savedData));
 
@@ -381,9 +452,8 @@
         });
 
 
-        // --- CORE OCR & MULTI-SCAN PROCESSING ---
+        // --- CORE OCR & MULTI-SCAN PROCESSING (kept for context) ---
 
-        // Centralized function to handle the OCR request
         async function runOcrScan(appendMode = false) {
             const file = fileInput.files[0];
             const language = document.getElementById('ocrLang').value;
@@ -395,14 +465,13 @@
                 return;
             }
 
-            // UI State change
             loadingMessage.style.display = 'block';
             ocrTextarea.disabled = true;
             pdfButton.style.display = 'none';
             
             if (isInitialScan) {
-                ocrTextarea.value = ''; // Clear only for initial scan
-                currentPageCount = 0; // Reset counter
+                ocrTextarea.value = ''; 
+                currentPageCount = 0; 
             }
             
             uploadBtn.disabled = true;
@@ -421,53 +490,55 @@
 
                 if (response.ok) {
                     const data = await response.json(); 
-                    
-                    // --- Handle Multi-Page/Multi-Scan Text ---
                     let scannedText = data.text;
                     
-                    // The backend automatically adds page separators for multi-page files (e.g., PDFs).
-                    // If we're appending separate images, we need to adjust the page numbering.
-                    
                     if (appendMode) {
-                        // For appended separate images/scans, treat the *entire result* as the next page set
-                        // We must remove the default PAGE 1, PAGE 2, etc., markers from the new scan's text 
-                        // and re-number based on the global currentPageCount.
-                        
-                        // Example: Replace initial markers (--- PAGE 1 ---) with new global marker
                         const regex = /--- PAGE (\d+) ---/g;
-                        const match = scannedText.match(regex);
-                        const pagesInNewScan = match ? match.length : 1; 
                         
                         let newText = '';
-                        let textParts = scannedText.split(regex).slice(1); // Split and remove first empty element
+                        let textParts = scannedText.split(regex).slice(1); 
                         
-                        for (let i = 0; i < textParts.length; i += 2) {
-                            const pageNumber = textParts[i]; // The page number found by the regex
-                            const pageContent = textParts[i + 1].trim(); 
-                            
+                        // The original logic handles text that *might* contain multiple pages (like an appended PDF)
+                        // but it assumes a pattern of [page number, page content] after splitting.
+                        // We will simplify this for single-image appends, assuming each new file is 1 page.
+                        
+                        // If the text from the new scan is empty or has no page markers, treat it as one page.
+                        if (scannedText.trim().length === 0) {
                             currentPageCount++;
-                            newText += `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n` + pageContent;
+                            newText = `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n[No text extracted for this page.]`;
+                        } else {
+                            // If the text has markers, process them, otherwise assume it's one block.
+                            const pageMatches = scannedText.match(regex);
+                            if (pageMatches) {
+                                for (let i = 0; i < textParts.length; i += 2) {
+                                    const pageContent = textParts[i + 1].trim(); 
+                                    currentPageCount++;
+                                    newText += `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n` + pageContent;
+                                }
+                            } else {
+                                currentPageCount++;
+                                newText = `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n` + scannedText;
+                            }
                         }
 
                         ocrTextarea.value += newText;
 
                     } else {
-                        // Initial scan or multi-page PDF scan: use text directly and update count
+                        // Initial scan: use text directly and update count
                         ocrTextarea.value = scannedText;
                         const pageMatches = scannedText.match(/--- PAGE (\d+) ---/g);
                         currentPageCount = pageMatches ? pageMatches.length : 1;
                         
-                        // Set the title only on the first scan
                         document.getElementById('pdfTitle').value = data.filename.split('.').slice(0, -1).join('.'); 
                         
-                        // Display the image (shows the first page)
+                        // Only update image element on initial scan to avoid unnecessary DOM changes
                         imageElement.src = '/uploads/' + data.filename;
                         imageElement.style.display = 'block';
                     }
                     
                     ocrTextarea.disabled = false;
                     pdfButton.style.display = 'block'; 
-                    scanNextBtn.style.display = 'block'; // Show the next scan button
+                    scanNextBtn.style.display = 'block'; 
                     
                 } else {
                     const error = await response.text();
@@ -481,20 +552,15 @@
                 loadingMessage.style.display = 'none';
                 uploadBtn.disabled = false;
                 scanNextBtn.disabled = false;
-                fileInput.value = ''; // Clear file input after scanning to prepare for the next file
+                fileInput.value = ''; 
             }
         }
         
-        // --- Event Listeners ---
-        
-        // 1. Initial Scan (clears editor)
         uploadBtn.addEventListener('click', () => runOcrScan(false));
-
-        // 2. Scan Next (appends to editor)
         scanNextBtn.addEventListener('click', () => runOcrScan(true));
 
 
-        // --- FIXED PDF DOWNLOAD LOGIC ---
+        // --- PDF DOWNLOAD LOGIC (kept for context) ---
         document.getElementById('pdfBtn').addEventListener('click', async (e) => {
             e.preventDefault(); 
             
@@ -545,7 +611,6 @@
             }
         });
 
-        // Initialize the saved files list on page load
         document.addEventListener('DOMContentLoaded', renderSavedFiles);
 
     </script>
