@@ -3,60 +3,250 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Image to Editable PDF Converter</title>
+    <title>Multi-Page OCR to PDF Converter</title>
     <style>
-        /* Minimal CSS for a clean look */
-        body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        h1 { text-align: center; }
-        .container { border: 1px solid #ccc; padding: 20px; border-radius: 8px; }
-        #ocrText { width: 100%; height: 300px; padding: 10px; box-sizing: border-box; resize: vertical; margin-bottom: 10px; }
-        .button-group { display: flex; justify-content: space-between; margin-top: 15px; }
-        button, input[type="file"] { padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; }
+        /* --- General Layout and Typography --- */
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            padding: 20px; 
+            background-color: #f0f2f5; 
+            color: #333;
+        }
+        h1 { text-align: center; color: #1f4287; margin-bottom: 30px; }
+        h2 { border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; margin-top: 0; color: #444; }
+        
+        /* --- Main App Grid Layout --- */
+        .app-grid {
+            display: grid;
+            grid-template-columns: 1fr 2fr; /* One column for controls, two for viewer/text */
+            gap: 20px;
+            margin-top: 20px;
+        }
+        @media (max-width: 900px) {
+            .app-grid {
+                grid-template-columns: 1fr; /* Stack columns on smaller screens */
+            }
+        }
+        
+        .section-panel { 
+            background-color: #fff; 
+            padding: 20px; 
+            border-radius: 8px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
+            height: fit-content;
+        }
+        .main-content {
+            grid-column: 2 / 3; /* Occupy the second column */
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        @media (max-width: 900px) {
+            .main-content {
+                grid-column: 1 / 2; /* Revert to single column */
+            }
+        }
+
+        /* --- Input & Control Styles --- */
+        .input-group label { display: block; margin-bottom: 5px; font-weight: 600; color: #555; }
+        input[type="file"], select, input[type="text"] { 
+            width: 100%; 
+            padding: 10px; 
+            border: 1px solid #ccc; 
+            border-radius: 4px; 
+            box-sizing: border-box; 
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+        
+        #ocrText { 
+            width: 100%; 
+            height: 350px; 
+            padding: 15px; 
+            box-sizing: border-box; 
+            resize: vertical; 
+            border: 1px solid #ccc; 
+            border-radius: 4px; 
+            font-family: monospace; 
+            font-size: 14px;
+        }
+        
+        .button-group { display: flex; justify-content: flex-end; margin-top: 15px; gap: 10px; }
+        button { 
+            padding: 12px 20px; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            border: none; 
+            font-weight: bold; 
+            transition: background-color 0.2s; 
+        }
         #uploadBtn { background-color: #007bff; color: white; }
-        #pdfBtn { background-color: #28a745; color: white; display: none; } /* Hidden until OCR is done */
-        .loading { color: #007bff; margin-top: 10px; display: none; }
+        #uploadBtn:hover { background-color: #0056b3; }
+        #pdfBtn { background-color: #28a745; color: white; display: none; }
+        #pdfBtn:hover { background-color: #1e7e34; }
+        
+        .loading { color: #007bff; margin-top: 10px; font-weight: bold; display: none; }
+
+        /* --- Tesseract Status --- */
+        .tesseract-status {
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+            word-wrap: break-word; /* Allows long paths to wrap */
+        }
+        .status-ok { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .status-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6fb; }
+
+        /* --- Flashed Messages --- */
+        .alert { padding: 15px; margin-bottom: 20px; border-radius: 4px; font-weight: 500; }
+        .alert-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .alert-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .alert-warning { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+
+        /* --- Image Viewer --- */
+        #scannedImage { 
+            max-width: 100%; 
+            max-height: 400px; 
+            display: none; 
+            border: 1px solid #ddd; 
+            padding: 5px;
+            border-radius: 4px;
+        }
     </style>
 </head>
 <body>
-    <h1>🖼️ Image to Editable PDF 📝</h1>
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+            <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
 
-    <div class="container">
-        <h2>1. Upload Image for Scanning</h2>
-        <input type="file" id="imageFile" accept="image/*">
-        <button id="uploadBtn">Scan Image (OCR)</button>
-        <div class="loading" id="loadingMessage">Processing image... Please wait.</div>
+    <h1>🤖 Multi-Page OCR & PDF Creator</h1>
 
-        <hr>
+    <div class="app-grid">
+        <div class="section-panel controls-panel">
+            <h2>Settings & Status</h2>
+            
+            <div class="tesseract-status {% if tesseract_ok %}status-ok{% else %}status-error{% endif %}">
+                <strong>OCR Engine Status:</strong>
+                <p>{{ tesseract_status }}</p>
+            </div>
 
-        <h2>2. Edit Scanned Text</h2>
-        <textarea id="ocrText" placeholder="The extracted text will appear here. Edit it as needed." disabled></textarea>
+            <div class="input-group">
+                <label for="imageFile">1. Select Document (Image, TIFF, PDF) - Max 5MB</label>
+                <input type="file" id="imageFile" accept="image/*,.pdf,.tif,.tiff">
+            </div>
 
-        <div class="button-group">
-            <button id="pdfBtn">3. Convert Edited Text to PDF</button>
+            <div class="input-group">
+                <label for="ocrLang">2. Select OCR Language</label>
+                <select id="ocrLang">
+                    <option value="eng" {% if last_language == 'eng' %}selected{% endif %}>English (eng)</option>
+                    <option value="fra" {% if last_language == 'fra' %}selected{% endif %}>French (fra)</option>
+                    <option value="deu" {% if last_language == 'deu' %}selected{% endif %}>German (deu)</option>
+                    <option value="spa" {% if last_language == 'spa' %}selected{% endif %}>Spanish (spa)</option>
+                    <option value="ita" {% if last_language == 'ita' %}selected{% endif %}>Italian (ita)</option>
+                </select>
+            </div>
+            
+            <div class="input-group">
+                <label for="ocrPsm">3. OCR Page Segmentation Mode (PSM)</label>
+                <select id="ocrPsm">
+                    <option value="3" selected>3 - Fully automatic page segmentation (Default)</option>
+                    <option value="6">6 - Assume a single uniform block of text (Best for simple docs)</option>
+                    <option value="1">1 - Automatic page segmentation with OSD (Orientation)</option>
+                    <option value="7">7 - Treat the image as a single text line</option>
+                    <option value="8">8 - Treat the image as a single word</option>
+                    <option value="10">10 - Treat the image as a single character</option>
+                </select>
+            </div>
+
+            <button id="uploadBtn">4. Start OCR Scan</button>
+            <div class="loading" id="loadingMessage">Processing document... This may take a moment for multi-page files.</div>
+
+            <hr style="margin-top: 20px;">
+            
+            <h2>PDF Output</h2>
+            
+            <div class="input-group">
+                <label for="pdfFont">PDF Font Style</label>
+                <select id="pdfFont">
+                    <option value="Arial" selected>Arial (Default)</option>
+                    <option value="Times">Times New Roman</option>
+                    <option value="Courier">Courier</option>
+                </select>
+            </div>
+
+            <div class="input-group">
+                <label for="pdfTitle">PDF Document Title (e.g., Invoice-2024)</label>
+                <input type="text" id="pdfTitle" placeholder="Enter desired filename" 
+                       value="{{ last_pdf_title }}">
+            </div>
+            <div class="button-group">
+                <button id="pdfBtn">5. Download Final PDF</button>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="section-panel">
+                <h2>Document Viewer (Page 1 Preview)</h2>
+                <div id="imageDisplayArea" style="text-align: center;">
+                    <img id="scannedImage" alt="Scanned Document Preview">
+                </div>
+            </div>
+
+            <div class="section-panel">
+                <h2>Extracted Text Editor</h2>
+                <textarea id="ocrText" placeholder="The extracted text will appear here. Edit it as needed. Pages are separated by '--- PAGE X ---'." disabled></textarea>
+            </div>
         </div>
     </div>
 
     <script>
+        // Set the max file size based on the backend limit (5 MB) for client-side check
+        const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024; 
+        const fileInput = document.getElementById('imageFile');
+
+        // --- Client-Side File Size Validation ---
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file && file.size > MAX_FILE_SIZE_BYTES) {
+                alert(`Warning: File size (${(file.size / (1024 * 1024)).toFixed(2)} MB) exceeds the maximum limit of 5 MB. Please select a smaller file.`);
+                fileInput.value = ''; // Clear the file input
+            }
+        });
+
         document.getElementById('uploadBtn').addEventListener('click', async () => {
-            const fileInput = document.getElementById('imageFile');
             const file = fileInput.files[0];
             const ocrTextarea = document.getElementById('ocrText');
             const pdfButton = document.getElementById('pdfBtn');
             const loadingMessage = document.getElementById('loadingMessage');
+            const imageElement = document.getElementById('scannedImage');
+            
+            const language = document.getElementById('ocrLang').value;
+            const psm = document.getElementById('ocrPsm').value; // Get PSM value
 
             if (!file) {
-                alert('Please select an image file first.');
+                alert('Please select a document file first.');
                 return;
             }
 
-            // Show loading state
+            // Reset UI state
             loadingMessage.style.display = 'block';
             ocrTextarea.disabled = true;
             pdfButton.style.display = 'none';
             ocrTextarea.value = '';
+            imageElement.style.display = 'none';
 
             const formData = new FormData();
             formData.append('file', file);
+            formData.append('language', language);
+            formData.append('psm', psm); // Add PSM to form data
 
             try {
                 const response = await fetch('/upload', {
@@ -65,19 +255,33 @@
                 });
 
                 if (response.ok) {
-                    const text = await response.text();
-                    ocrTextarea.value = text;
+                    const data = await response.json(); 
+                    
+                    ocrTextarea.value = data.text;
                     ocrTextarea.disabled = false;
                     pdfButton.style.display = 'block';
+
+                    // Display the image (shows the first page)
+                    imageElement.src = '/uploads/' + data.filename;
+                    imageElement.style.display = 'block';
+
                 } else {
-                    // Display the specific error message from the backend (Tesseract Not Found)
                     const error = await response.text();
-                    alert('Error during OCR: ' + error);
-                    ocrTextarea.value = 'OCR failed. Check console for details.';
+                    
+                    if (response.status === 413) {
+                        alert('Upload Failed (File Size Limit): ' + error);
+                    } else if (response.status === 503) {
+                        alert('Server Unavailable: Tesseract is not configured.');
+                    } else if (response.status === 500) {
+                        alert('Server Error (OCR): ' + error);
+                    } else {
+                        alert('An unknown error occurred: ' + error);
+                    }
+                    ocrTextarea.value = 'Processing failed. See flash message for details.';
                 }
             } catch (error) {
                 console.error('Fetch error:', error);
-                alert('A network error occurred: ' + error.message);
+                alert('A network error occurred. Check server connection.');
             } finally {
                 loadingMessage.style.display = 'none';
             }
@@ -85,29 +289,44 @@
 
         document.getElementById('pdfBtn').addEventListener('click', async () => {
             const editedText = document.getElementById('ocrText').value;
+            const pdfTitleInput = document.getElementById('pdfTitle').value.trim();
+            const pdfFont = document.getElementById('pdfFont').value; // Get Font value
+            
+            let downloadName = pdfTitleInput || 'scanned_document';
+            downloadName = downloadName.endsWith('.pdf') ? downloadName : downloadName + '.pdf';
 
             if (!editedText.trim()) {
                 alert('The text area is empty. Nothing to convert.');
                 return;
             }
 
-            // Create a temporary form to submit the edited text
+            // Use form submission for file download
             const tempForm = document.createElement('form');
             tempForm.method = 'POST';
             tempForm.action = '/generate_pdf';
 
-            // Add the text as a hidden field
-            const input = document.createElement('input');
-            input.type = 'hidden';
-            input.name = 'edited_text';
-            input.value = editedText;
+            const input_text = document.createElement('input');
+            input_text.type = 'hidden';
+            input_text.name = 'edited_text';
+            input_text.value = editedText;
 
-            tempForm.appendChild(input);
+            const input_title = document.createElement('input');
+            input_title.type = 'hidden';
+            input_title.name = 'download_name';
+            input_title.value = downloadName;
+            
+            const input_font = document.createElement('input'); // Font field
+            input_font.type = 'hidden';
+            input_font.name = 'pdf_font';
+            input_font.value = pdfFont;
 
-            // Submit the form to trigger the file download
+            tempForm.appendChild(input_text);
+            tempForm.appendChild(input_title);
+            tempForm.appendChild(input_font); // Append font
+
             document.body.appendChild(tempForm);
             tempForm.submit();
-            document.body.removeChild(tempForm); // Clean up
+            document.body.removeChild(tempForm);
         });
 
     </script>
