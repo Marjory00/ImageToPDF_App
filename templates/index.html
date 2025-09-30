@@ -82,12 +82,29 @@
             font-weight: bold; 
             transition: background-color 0.2s; 
         }
-        #uploadBtn { background-color: #007bff; color: white; }
+        /* Style for the new "Scan More" button */
+        #uploadBtn { 
+            background-color: #007bff; 
+            color: white; 
+            width: 100%; 
+            margin-top: 5px; 
+        }
         #uploadBtn:hover { background-color: #0056b3; }
+
+        /* The separate button for scanning subsequent images */
+        #scanNextBtn {
+            background-color: #17a2b8; /* Info blue/cyan */
+            color: white;
+            width: 100%;
+            margin-top: 5px;
+            display: none; /* Hidden until first scan completes */
+        }
+        #scanNextBtn:hover { background-color: #138496; }
+
         #pdfBtn { background-color: #28a745; color: white; display: none; }
         #pdfBtn:hover { background-color: #1e7e34; }
         
-        /* NEW: Local Storage Buttons */
+        /* Local Storage Buttons */
         #saveTextBtn { background-color: #ffc107; color: #343a40; margin-top: 10px; width: 100%; padding: 8px; }
         #saveTextBtn:hover { background-color: #e0a800; }
         .local-file-actions { display: flex; gap: 5px; margin-top: 5px;}
@@ -122,7 +139,7 @@
             border-radius: 4px;
         }
 
-        /* NEW: Local Storage List */
+        /* Local Storage List */
         #savedFilesList {
             list-style: none;
             padding: 0;
@@ -196,7 +213,9 @@
                 </select>
             </div>
 
-            <button id="uploadBtn">4. Start OCR Scan</button>
+            <button id="uploadBtn">4. Start OCR Scan (Initial)</button>
+            <button id="scanNextBtn" style="display: none;">4. Scan Next Page/Image (Append to Text)</button>
+            
             <div class="loading" id="loadingMessage">Processing document... This may take a moment for multi-page files.</div>
 
             <hr style="margin-top: 20px;">
@@ -210,7 +229,7 @@
             <p style="font-size: 0.85em; color: #777; margin-top: 5px;">*Saved only in this browser.</p>
             
             <ul id="savedFilesList">
-                </ul>
+            </ul>
             <hr>
             
             <h2>PDF Output</h2>
@@ -227,7 +246,7 @@
             <div class="input-group">
                 <label for="pdfTitle">PDF Document Title (e.g., Invoice-2024)</label>
                 <input type="text" id="pdfTitle" placeholder="Enter desired filename" 
-                        value="{{ last_pdf_title }}">
+                         value="{{ last_pdf_title }}">
             </div>
             <div class="button-group">
                 <button id="pdfBtn">5. Download Final PDF</button>
@@ -259,12 +278,24 @@
         const imageElement = document.getElementById('scannedImage');
         const savedFilesList = document.getElementById('savedFilesList');
         const localFileNameInput = document.getElementById('localFileName');
+        
+        // NEW: Track the current page count for multi-scan
+        let currentPageCount = 0; 
+        const uploadBtn = document.getElementById('uploadBtn');
+        const scanNextBtn = document.getElementById('scanNextBtn');
 
 
         // --- Utility Function: Render Saved Files List ---
         function renderSavedFiles() {
             savedFilesList.innerHTML = '';
-            const savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+            // Use try-catch for safe JSON parsing
+            let savedData;
+            try {
+                savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+            } catch (e) {
+                console.error("Error parsing local storage data:", e);
+                savedData = [];
+            }
             
             if (savedData.length === 0) {
                 savedFilesList.innerHTML = '<li style="color: #777;">No documents saved locally.</li>';
@@ -286,7 +317,7 @@
             });
         }
 
-        // --- Local Storage Functions ---
+        // --- Local Storage Functions (made global for onclick) ---
         window.loadText = function(timestamp) {
             const savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
             const item = savedData.find(doc => doc.timestamp === timestamp);
@@ -295,7 +326,13 @@
                 ocrTextarea.value = item.text;
                 ocrTextarea.disabled = false;
                 pdfButton.style.display = 'block';
-                document.getElementById('pdfTitle').value = item.name;
+                document.getElementById('pdfTitle').value = item.name.replace(/\s*\(.*\)$/, ''); // Clean up name for PDF title
+                
+                // When loading from local storage, we can't determine the image or page count easily, 
+                // so reset the count and allow future scans to append.
+                currentPageCount = 0; 
+                scanNextBtn.style.display = 'block';
+                
                 alert(`Document "${item.name}" loaded for editing.`);
             }
         };
@@ -344,33 +381,32 @@
         });
 
 
-        // --- OCR & PDF Processing (Existing Logic with Minor UI Tweaks) ---
+        // --- CORE OCR & MULTI-SCAN PROCESSING ---
 
-        // Client-Side File Size Validation
-        fileInput.addEventListener('change', (e) => {
-            const file = e.target.files[0];
-            if (file && file.size > MAX_FILE_SIZE_BYTES) {
-                alert(`Warning: File size (${(file.size / (1024 * 1024)).toFixed(2)} MB) exceeds the maximum limit of 5 MB. Please select a smaller file.`);
-                fileInput.value = ''; // Clear the file input
-            }
-        });
-
-        document.getElementById('uploadBtn').addEventListener('click', async () => {
+        // Centralized function to handle the OCR request
+        async function runOcrScan(appendMode = false) {
             const file = fileInput.files[0];
             const language = document.getElementById('ocrLang').value;
             const psm = document.getElementById('ocrPsm').value; 
+            const isInitialScan = !appendMode;
 
             if (!file) {
                 alert('Please select a document file first.');
                 return;
             }
 
-            // Reset UI state
+            // UI State change
             loadingMessage.style.display = 'block';
             ocrTextarea.disabled = true;
             pdfButton.style.display = 'none';
-            ocrTextarea.value = '';
-            imageElement.style.display = 'none';
+            
+            if (isInitialScan) {
+                ocrTextarea.value = ''; // Clear only for initial scan
+                currentPageCount = 0; // Reset counter
+            }
+            
+            uploadBtn.disabled = true;
+            scanNextBtn.disabled = true;
 
             const formData = new FormData();
             formData.append('file', file);
@@ -386,31 +422,82 @@
                 if (response.ok) {
                     const data = await response.json(); 
                     
-                    ocrTextarea.value = data.text;
+                    // --- Handle Multi-Page/Multi-Scan Text ---
+                    let scannedText = data.text;
+                    
+                    // The backend automatically adds page separators for multi-page files (e.g., PDFs).
+                    // If we're appending separate images, we need to adjust the page numbering.
+                    
+                    if (appendMode) {
+                        // For appended separate images/scans, treat the *entire result* as the next page set
+                        // We must remove the default PAGE 1, PAGE 2, etc., markers from the new scan's text 
+                        // and re-number based on the global currentPageCount.
+                        
+                        // Example: Replace initial markers (--- PAGE 1 ---) with new global marker
+                        const regex = /--- PAGE (\d+) ---/g;
+                        const match = scannedText.match(regex);
+                        const pagesInNewScan = match ? match.length : 1; 
+                        
+                        let newText = '';
+                        let textParts = scannedText.split(regex).slice(1); // Split and remove first empty element
+                        
+                        for (let i = 0; i < textParts.length; i += 2) {
+                            const pageNumber = textParts[i]; // The page number found by the regex
+                            const pageContent = textParts[i + 1].trim(); 
+                            
+                            currentPageCount++;
+                            newText += `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n` + pageContent;
+                        }
+
+                        ocrTextarea.value += newText;
+
+                    } else {
+                        // Initial scan or multi-page PDF scan: use text directly and update count
+                        ocrTextarea.value = scannedText;
+                        const pageMatches = scannedText.match(/--- PAGE (\d+) ---/g);
+                        currentPageCount = pageMatches ? pageMatches.length : 1;
+                        
+                        // Set the title only on the first scan
+                        document.getElementById('pdfTitle').value = data.filename.split('.').slice(0, -1).join('.'); 
+                        
+                        // Display the image (shows the first page)
+                        imageElement.src = '/uploads/' + data.filename;
+                        imageElement.style.display = 'block';
+                    }
+                    
                     ocrTextarea.disabled = false;
-                    pdfButton.style.display = 'block';
-
-                    // Display the image (shows the first page)
-                    imageElement.src = '/uploads/' + data.filename;
-                    imageElement.style.display = 'block';
-                    document.getElementById('pdfTitle').value = data.filename.split('.').slice(0, -1).join('.'); // Set title from filename
-
+                    pdfButton.style.display = 'block'; 
+                    scanNextBtn.style.display = 'block'; // Show the next scan button
+                    
                 } else {
                     const error = await response.text();
-                    
-                    // Error handling logic (kept concise)
-                    alert('OCR processing failed. Check flash message for details.');
-                    ocrTextarea.value = 'Processing failed. See flash message for details.';
+                    ocrTextarea.value = `Processing failed. Server message: ${error}`;
+                    alert('OCR processing failed. Check editor and flash message for details.');
                 }
             } catch (error) {
                 console.error('Fetch error:', error);
                 alert('A network error occurred. Check server connection.');
             } finally {
                 loadingMessage.style.display = 'none';
+                uploadBtn.disabled = false;
+                scanNextBtn.disabled = false;
+                fileInput.value = ''; // Clear file input after scanning to prepare for the next file
             }
-        });
+        }
+        
+        // --- Event Listeners ---
+        
+        // 1. Initial Scan (clears editor)
+        uploadBtn.addEventListener('click', () => runOcrScan(false));
 
-        document.getElementById('pdfBtn').addEventListener('click', async () => {
+        // 2. Scan Next (appends to editor)
+        scanNextBtn.addEventListener('click', () => runOcrScan(true));
+
+
+        // --- FIXED PDF DOWNLOAD LOGIC ---
+        document.getElementById('pdfBtn').addEventListener('click', async (e) => {
+            e.preventDefault(); 
+            
             const editedText = ocrTextarea.value;
             const pdfTitleInput = document.getElementById('pdfTitle').value.trim();
             const pdfFont = document.getElementById('pdfFont').value;
@@ -423,36 +510,39 @@
                 return;
             }
 
-            // Use form submission for file download
-            const tempForm = document.createElement('form');
-            tempForm.method = 'POST';
-            tempForm.action = '/generate_pdf';
+            const body = new URLSearchParams();
+            body.append('edited_text', editedText);
+            body.append('download_name', downloadName);
+            body.append('pdf_font', pdfFont);
 
-            // Hidden input for edited text
-            const input_text = document.createElement('input');
-            input_text.type = 'hidden';
-            input_text.name = 'edited_text';
-            input_text.value = editedText;
+            try {
+                const response = await fetch('/generate_pdf', {
+                    method: 'POST',
+                    body: body,
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    }
+                });
 
-            // Hidden input for download name
-            const input_title = document.createElement('input');
-            input_title.type = 'hidden';
-            input_title.name = 'download_name';
-            input_title.value = downloadName;
-            
-            // Hidden input for font selection
-            const input_font = document.createElement('input');
-            input_font.type = 'hidden';
-            input_font.name = 'pdf_font';
-            input_font.value = pdfFont;
-
-            tempForm.appendChild(input_text);
-            tempForm.appendChild(input_title);
-            tempForm.appendChild(input_font); 
-
-            document.body.appendChild(tempForm);
-            tempForm.submit();
-            document.body.removeChild(tempForm);
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    a.download = downloadName; 
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url); 
+                } else {
+                    const error = await response.text();
+                    alert(`PDF Generation Failed. Server error: ${error}`);
+                    console.error('PDF Generation Error:', error);
+                }
+            } catch (error) {
+                console.error('Network Error during PDF generation:', error);
+                alert('A network error occurred during PDF generation.');
+            }
         });
 
         // Initialize the saved files list on page load

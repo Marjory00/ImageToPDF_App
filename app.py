@@ -2,7 +2,7 @@ import os
 import io
 from flask import (
     Flask, render_template, request, send_file, session, 
-    jsonify, send_from_directory, flash
+    jsonify, send_from_directory, flash, url_for # <-- ENSURE url_for IS IMPORTED
 )
 from PIL import Image, ImageFilter
 import pytesseract
@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv() 
 
-# --- Configuration & Tesseract Status Check (FIXED LOGIC) ---
+# --- Configuration & Tesseract Status Check ---
 
 # 1. Use environment variable for the primary Tesseract path
 TESSERACT_PRIMARY_PATH = os.environ.get('TESSERACT_CMD') 
@@ -40,28 +40,21 @@ unique_paths = list(filter(None, set(TESSERACT_FALLBACK_PATHS)))
 
 for path in unique_paths:
     if os.path.exists(path):
-        pytesseract.pytesseract.tesseract_cmd = path
+        final_tesseract_path = path
         tesseract_found = True
         tesseract_status_msg = f"Tesseract Found. Path: {path}"
-        final_tesseract_path = path
         break
         
-# --- REFINED LOGIC: Only set tesseract_cmd if found, or if TESSERACT_CMD was specified (to allow TesseractNotFoundError to be raised later) ---
+# --- REFINED LOGIC ---
 if tesseract_found:
     pytesseract.pytesseract.tesseract_cmd = final_tesseract_path
 elif TESSERACT_PRIMARY_PATH:
-    # Set the path to the user-specified one, even if it doesn't exist.
-    # This allows pytesseract to fail gracefully inside the try/except block.
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_PRIMARY_PATH
 else:
-    # Set a common default path if no path was found anywhere, to prevent the app from halting
-    # if pytesseract.pytesseract.tesseract_cmd is accessed before checking tesseract_found.
-    # The 'tesseract_found' flag handles the real error messaging.
     pytesseract.pytesseract.tesseract_cmd = 'tesseract'
 
 
 app = Flask(__name__)
-# --- FIX: Use environment variable for secret key ---
 app.secret_key = os.environ.get('SECRET_KEY', 'default_secret_fallback_key') 
 
 UPLOAD_FOLDER = 'uploads'
@@ -102,7 +95,7 @@ def index():
 # ------------------------------------------------------------------
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    """Handles image upload, performs OCR page-by-page, and returns text/filename."""
+    """Handles image upload, performs OCR page-by-page, and returns text/filename/image_url."""
     if not tesseract_found:
         flash("Tesseract is not configured. OCR cannot run.", 'error')
         return "Tesseract Not Ready", 503
@@ -113,7 +106,7 @@ def upload_file():
     
     file = request.files['file']
     ocr_language = request.form.get('language', 'eng') 
-    ocr_psm = request.form.get('psm', '3') # Get PSM from the frontend form data
+    ocr_psm = request.form.get('psm', '3')
 
     if file.filename == '':
         flash('No selected file.', 'error')
@@ -143,7 +136,6 @@ def upload_file():
             img = Image.open(filepath)
             full_document_text = []
             
-            # --- Tesseract Configuration String (Uses PSM) ---
             tess_config = f'--psm {ocr_psm}'
 
             for i in range(img.n_frames):
@@ -151,7 +143,6 @@ def upload_file():
                 current_img = img.copy() 
                 current_img = preprocess_image(current_img) 
 
-                # Perform OCR on the single page, applying the PSM configuration
                 page_text = pytesseract.image_to_string(current_img, lang=ocr_language, config=tess_config)
                 
                 full_document_text.append(f"\n--- PAGE {i + 1} ---\n\n" + page_text)
@@ -162,10 +153,17 @@ def upload_file():
             session['last_language'] = ocr_language 
             
             flash(f"Successfully scanned '{filename}' ({img.n_frames} page(s)).", 'success')
-            return jsonify({'text': extracted_text, 'filename': filename}), 200
+            
+            # --- FIX: GET AND RETURN IMAGE URL ---
+            image_url = url_for('uploaded_file', filename=filename) 
+
+            return jsonify({
+                'text': extracted_text, 
+                'filename': filename,
+                'image_url': image_url # <-- NEW: URL for frontend to display image
+            }), 200
 
         except TesseractNotFoundError:
-            # This should only happen if the environment variable path was wrong but Tesseract wasn't found in fallback
             error_msg = f"Tesseract not found. Path: {pytesseract.pytesseract.tesseract_cmd}. Check your .env file."
             flash(error_msg, 'error')
             return error_msg, 500 
@@ -186,7 +184,7 @@ def generate_pdf():
     """Takes the edited text and generates a PDF document."""
     edited_text = request.form.get('edited_text', '')
     download_name = request.form.get('download_name', 'scanned_document.pdf')
-    pdf_font = request.form.get('pdf_font', 'Arial') # Get PDF Font from the frontend form data
+    pdf_font = request.form.get('pdf_font', 'Arial') 
 
     if not edited_text:
         flash('No text provided for PDF generation.', 'warning')
@@ -198,10 +196,8 @@ def generate_pdf():
         
         pdf = FPDF('P', 'mm', 'A4') 
         pdf.add_page()
-        # Use the dynamically selected font
         pdf.set_font(pdf_font, size=12)
         
-        # Ensure encoding handles common characters for fpdf
         safe_text = edited_text.encode('latin-1', 'replace').decode('latin-1')
         
         pdf.multi_cell(0, 10, safe_text, align='J') 
