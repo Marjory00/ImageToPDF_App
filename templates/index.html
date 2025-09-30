@@ -272,7 +272,7 @@
             <div class="input-group">
                 <label for="pdfTitle">PDF Document Title (e.g., Invoice-2024)</label>
                 <input type="text" id="pdfTitle" placeholder="Enter desired filename" 
-                         value="{{ last_pdf_title }}">
+                            value="{{ last_pdf_title }}">
             </div>
             <div class="button-group">
                 <button id="pdfBtn">5. Download Final PDF</button>
@@ -314,7 +314,7 @@
         const uploadBtn = document.getElementById('uploadBtn');
         const scanNextBtn = document.getElementById('scanNextBtn');
         
-        // NEW: Zoom variables
+        // Zoom variables
         const zoomInBtn = document.getElementById('zoomInBtn');
         const zoomOutBtn = document.getElementById('zoomOutBtn');
         const zoomResetBtn = document.getElementById('zoomResetBtn');
@@ -324,13 +324,14 @@
         const maxZoom = 5.0;
 
 
-        // --- NEW: Zoom Functions ---
+        // --- Zoom Functions ---
         function applyZoom() {
             // Apply zoom using CSS transform: scale() for smooth scaling
             imageElement.style.transform = `scale(${currentZoom})`;
             
             // Adjust max-width based on zoom to allow it to exceed 100% and enable scrolling
             if (currentZoom > 1.0) {
+                // Allows the element to expand beyond its container, enabling the wrapper's overflow: auto
                 imageElement.style.maxWidth = `${currentZoom * 100}%`;
             } else {
                 imageElement.style.maxWidth = '100%';
@@ -363,7 +364,7 @@
         });
 
 
-        // --- Utility Function: Render Saved Files List (omitted body for brevity) ---
+        // --- Utility Function: Render Saved Files List ---
         function renderSavedFiles() {
             savedFilesList.innerHTML = '';
             let savedData;
@@ -381,7 +382,7 @@
 
             savedData.forEach(item => {
                 const li = document.createElement('li');
-                const timestamp = new Date(item.timestamp).toLocaleString();
+                const timestamp = new Date(parseInt(item.timestamp)).toLocaleString();
                 
                 li.innerHTML = `
                     <span class="file-name" data-id="${item.timestamp}" title="Click to Load Text">${item.name} (${timestamp})</span>
@@ -394,7 +395,7 @@
             });
         }
 
-        // --- Local Storage Functions (kept for context) ---
+        // --- Local Storage Functions (made global for onclick) ---
         window.loadText = function(timestamp) {
             const savedData = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
             const item = savedData.find(doc => doc.timestamp === timestamp);
@@ -405,6 +406,7 @@
                 pdfButton.style.display = 'block';
                 document.getElementById('pdfTitle').value = item.name.replace(/\s*\(.*\)$/, ''); 
                 
+                // Reset page count (since we're loading a composite document) and show 'scan next'
                 currentPageCount = 0; 
                 scanNextBtn.style.display = 'block';
                 
@@ -452,18 +454,30 @@
         });
 
 
-        // --- CORE OCR & MULTI-SCAN PROCESSING (kept for context) ---
+        // --- CORE OCR & MULTI-SCAN PROCESSING ---
 
+        /**
+         * Validates the selected file and runs the OCR scan.
+         * @param {boolean} appendMode - True if this is a subsequent scan to append text.
+         */
         async function runOcrScan(appendMode = false) {
             const file = fileInput.files[0];
-            const language = document.getElementById('ocrLang').value;
-            const psm = document.getElementById('ocrPsm').value; 
-            const isInitialScan = !appendMode;
-
+            
+            // --- FIX: Client-side validation for file existence and size ---
             if (!file) {
                 alert('Please select a document file first.');
                 return;
             }
+            if (file.size > MAX_FILE_SIZE_BYTES) {
+                alert(`File is too large. Max size is ${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB.`);
+                fileInput.value = ''; // Clear the input
+                return;
+            }
+            // ------------------------------------------------------------------
+
+            const language = document.getElementById('ocrLang').value;
+            const psm = document.getElementById('ocrPsm').value; 
+            const isInitialScan = !appendMode;
 
             loadingMessage.style.display = 'block';
             ocrTextarea.disabled = true;
@@ -496,29 +510,22 @@
                         const regex = /--- PAGE (\d+) ---/g;
                         
                         let newText = '';
-                        let textParts = scannedText.split(regex).slice(1); 
                         
-                        // The original logic handles text that *might* contain multiple pages (like an appended PDF)
-                        // but it assumes a pattern of [page number, page content] after splitting.
-                        // We will simplify this for single-image appends, assuming each new file is 1 page.
-                        
-                        // If the text from the new scan is empty or has no page markers, treat it as one page.
-                        if (scannedText.trim().length === 0) {
-                            currentPageCount++;
-                            newText = `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n[No text extracted for this page.]`;
-                        } else {
-                            // If the text has markers, process them, otherwise assume it's one block.
-                            const pageMatches = scannedText.match(regex);
-                            if (pageMatches) {
-                                for (let i = 0; i < textParts.length; i += 2) {
-                                    const pageContent = textParts[i + 1].trim(); 
-                                    currentPageCount++;
-                                    newText += `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n` + pageContent;
-                                }
-                            } else {
+                        // Check if the new scan contains Tesseract's own multi-page markers
+                        const pageMatches = scannedText.match(regex);
+                        if (pageMatches) {
+                            // Split on the pattern but skip the first element which is before the first match
+                            const textParts = scannedText.split(regex).slice(1); 
+                            for (let i = 0; i < textParts.length; i += 2) {
+                                // textParts[i] is the page number, textParts[i+1] is the content
+                                const pageContent = textParts[i + 1].trim(); 
                                 currentPageCount++;
-                                newText = `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n` + scannedText;
+                                newText += `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n` + pageContent;
                             }
+                        } else {
+                            // Assume a single image/page was scanned
+                            currentPageCount++;
+                            newText = `\n\n======================================================\n--- APPENDED PAGE ${currentPageCount} (from file: ${data.filename}) ---\n======================================================\n\n` + scannedText;
                         }
 
                         ocrTextarea.value += newText;
@@ -531,7 +538,7 @@
                         
                         document.getElementById('pdfTitle').value = data.filename.split('.').slice(0, -1).join('.'); 
                         
-                        // Only update image element on initial scan to avoid unnecessary DOM changes
+                        // Update image element on initial scan for preview
                         imageElement.src = '/uploads/' + data.filename;
                         imageElement.style.display = 'block';
                     }
@@ -552,7 +559,7 @@
                 loadingMessage.style.display = 'none';
                 uploadBtn.disabled = false;
                 scanNextBtn.disabled = false;
-                fileInput.value = ''; 
+                fileInput.value = ''; // Clear input for next file selection
             }
         }
         
@@ -560,7 +567,7 @@
         scanNextBtn.addEventListener('click', () => runOcrScan(true));
 
 
-        // --- PDF DOWNLOAD LOGIC (kept for context) ---
+        // --- PDF DOWNLOAD LOGIC ---
         document.getElementById('pdfBtn').addEventListener('click', async (e) => {
             e.preventDefault(); 
             
@@ -569,6 +576,7 @@
             const pdfFont = document.getElementById('pdfFont').value;
             
             let downloadName = pdfTitleInput || 'scanned_document';
+            // Ensure .pdf extension is present
             downloadName = downloadName.endsWith('.pdf') ? downloadName : downloadName + '.pdf';
 
             if (!editedText.trim()) {
@@ -582,6 +590,11 @@
             body.append('pdf_font', pdfFont);
 
             try {
+                // Show a brief message, as PDF generation can take a moment
+                loadingMessage.textContent = 'Generating PDF...';
+                loadingMessage.style.display = 'block';
+                pdfButton.disabled = true;
+
                 const response = await fetch('/generate_pdf', {
                     method: 'POST',
                     body: body,
@@ -608,6 +621,10 @@
             } catch (error) {
                 console.error('Network Error during PDF generation:', error);
                 alert('A network error occurred during PDF generation.');
+            } finally {
+                loadingMessage.style.display = 'none';
+                loadingMessage.textContent = 'Processing document... This may take a moment for multi-page files.';
+                pdfButton.disabled = false;
             }
         });
 

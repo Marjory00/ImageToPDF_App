@@ -1,227 +1,292 @@
 import os
-import io
-from flask import (
-    Flask, render_template, request, send_file, session, 
-    jsonify, send_from_directory, flash, url_for # <-- ENSURE url_for IS IMPORTED
-)
-from PIL import Image, ImageFilter
+import json
+import logging
+from flask import Flask, request, render_template, send_from_directory, flash, redirect, url_for, make_response
+from PIL import Image, UnidentifiedImageError
 import pytesseract
-from fpdf import FPDF
-from werkzeug.utils import secure_filename
-from pytesseract.pytesseract import TesseractNotFoundError
-# --- NEW IMPORT ---
-from dotenv import load_dotenv
+from fpdf import FPDF 
 
-# Load environment variables from .env file
-load_dotenv() 
-
-# --- Configuration & Tesseract Status Check ---
-
-# 1. Use environment variable for the primary Tesseract path
-TESSERACT_PRIMARY_PATH = os.environ.get('TESSERACT_CMD') 
-
-# Define fallback paths
-TESSERACT_FALLBACK_PATHS = [
-    TESSERACT_PRIMARY_PATH, # Check the environment variable first
-    # Common defaults as backups
-    r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-    r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-    # Your specific user path (only kept as a last resort, prefer using TESSERACT_CMD in .env)
-    r'C:\Users\Marjory\AppData\Local\Programs\Tesseract-OCR\tesseract.exe', 
-]
-
-# Check for Tesseract installation and set the command path
-tesseract_found = False
-tesseract_status_msg = "Tesseract Not Found. OCR will fail."
-final_tesseract_path = None
-
-# Filter out None values and duplicates before checking paths
-unique_paths = list(filter(None, set(TESSERACT_FALLBACK_PATHS)))
-
-for path in unique_paths:
-    if os.path.exists(path):
-        final_tesseract_path = path
-        tesseract_found = True
-        tesseract_status_msg = f"Tesseract Found. Path: {path}"
-        break
-        
-# --- REFINED LOGIC ---
-if tesseract_found:
-    pytesseract.pytesseract.tesseract_cmd = final_tesseract_path
-elif TESSERACT_PRIMARY_PATH:
-    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PRIMARY_PATH
-else:
-    pytesseract.pytesseract.tesseract_cmd = 'tesseract'
-
-
-app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'default_secret_fallback_key') 
-
+# --- CONFIGURATION ---
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'tif', 'tiff', 'pdf'}
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+
+# Check and set Tesseract path
+TESSERACT_PATH = os.environ.get('TESSERACT_CMD') or 'tesseract'
+
+# 🚀 FIX 1: Explicitly set pytesseract.tesseract_cmd if a path is provided.
+# This ensures the subsequent get_tesseract_version() check uses the correct path.
+if TESSERACT_PATH != 'tesseract':
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+
+try:
+    # Attempt to get version, which throws TesseractNotFoundError if not found
+    pytesseract.get_tesseract_version() 
+    TESSERACT_OK = True
+    # Use the path that pytesseract successfully resolved
+    TESSERACT_STATUS = f"Tesseract found at: {pytesseract.pytesseract.tesseract_cmd}"
+except pytesseract.TesseractNotFoundError:
+    TESSERACT_OK = False
+    TESSERACT_STATUS = "Tesseract not found. Please install it or set the TESSERACT_CMD environment variable."
+
+# REMOVED: Redundant path setting block
+
+app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-MAX_FILE_SIZE = 5 * 1024 * 1024 
-app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE 
+app.secret_key = 'supersecretkey_for_flashing'  # Needed for flash messages
+
+# Ensure the upload folder exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --- UTILITIES ---
+
 def allowed_file(filename):
+    """Check if the file extension is allowed."""
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# --- Helper Function: Advanced Image Preprocessing ---
-def preprocess_image(img):
-    """Applies image enhancement (grayscale, noise reduction, thresholding)."""
-    img = img.convert('L')
-    img = img.filter(ImageFilter.MedianFilter(3)) 
-    threshold = 180 
-    img = img.point(lambda x: 0 if x < threshold else 255, '1')
-    return img
+def perform_ocr(image_path, lang, psm):
+    """Perform OCR on the file and return the text."""
+    try:
+        if not TESSERACT_OK:
+            raise pytesseract.TesseractNotFoundError("Tesseract not available.")
 
-# --- Route for the Main Page ---
+        # Tesseract configuration
+        config = f'--oem 3 --psm {psm}'
+        
+        # Perform OCR
+        text = pytesseract.image_to_string(Image.open(image_path), lang=lang, config=config)
+        
+        return text.strip()
+
+    except pytesseract.TesseractNotFoundError as e:
+        logger.error(f"Tesseract Error (Not Found): {e}")
+        flash('OCR Engine is not running or Tesseract is not installed correctly. Check TESSERACT_CMD.', 'error')
+        return None
+        
+    except RuntimeError as e:
+        error_msg = str(e)
+        logger.error(f"Tesseract Runtime Error: {error_msg}")
+        
+        if 'Failed loading language' in error_msg:
+            flash(f"OCR failed: Tesseract language pack '{lang}' is missing. Please install it.", 'error')
+        elif 'Error opening data file' in error_msg:
+            flash("OCR failed: Tesseract data files are missing or inaccessible.", 'error')
+        else:
+            flash(f'An OCR processing error occurred: {error_msg}', 'error')
+        return None
+        
+    except UnidentifiedImageError as e:
+        logger.error(f"Image Error: {e}")
+        flash("OCR failed: Could not open file. If this is a PDF/TIFF, ensure Ghostscript is installed.", 'error')
+        return None
+        
+    except Exception as e:
+        logger.error(f"Unclassified OCR Processing Error: {e}")
+        flash(f'An unexpected error occurred during OCR: {e}', 'error')
+        return None
+
+# --- FLASK ROUTES ---
+
 @app.route('/', methods=['GET'])
 def index():
-    """Renders the main page, passing preferences and Tesseract status."""
-    last_language = session.get('last_language', 'eng')
-    last_pdf_title = session.get('last_pdf_title', '')
-    
-    return render_template('index.html', 
-                           last_language=last_language, 
-                           last_pdf_title=last_pdf_title,
-                           tesseract_status=tesseract_status_msg,
-                           tesseract_ok=tesseract_found)
+    """Renders the main HTML page."""
+    return render_template(
+        'index.html',
+        tesseract_ok=TESSERACT_OK,
+        tesseract_status=TESSERACT_STATUS,
+        last_language=request.cookies.get('last_language', 'eng'),
+        last_pdf_title=request.cookies.get('last_pdf_title', '')
+    )
 
-# ------------------------------------------------------------------
-# --- Route for Image Upload and OCR (Uses PSM) ---
-# ------------------------------------------------------------------
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+    """Serves the uploaded file (for preview in the Document Viewer)."""
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    """Handles image upload, performs OCR page-by-page, and returns text/filename/image_url."""
-    if not tesseract_found:
-        flash("Tesseract is not configured. OCR cannot run.", 'error')
+    """Handles file upload, performs OCR, and prepares the image preview."""
+    if not TESSERACT_OK:
+        flash('OCR failed: Tesseract is not installed or configured.', 'error')
         return "Tesseract Not Ready", 503
 
     if 'file' not in request.files:
         flash('No file part in the request.', 'error')
-        return 'No file part', 400
-    
-    file = request.files['file']
-    ocr_language = request.form.get('language', 'eng') 
-    ocr_psm = request.form.get('psm', '3')
+        return "No file part", 400
 
-    if file.filename == '':
-        flash('No selected file.', 'error')
-        return 'No selected file', 400
+    file = request.files['file']
+    filename = file.filename
     
-    # Reset cursor and check file size
+    if filename == '':
+        flash('No selected file.', 'error')
+        return "No selected file", 400
+
+    if not allowed_file(filename):
+        flash('File type not allowed.', 'error')
+        return "Invalid file type", 400
+
+    # Check file size after validation (client-side check is primary, this is secondary)
     file.seek(0, os.SEEK_END)
     file_size = file.tell()
-    file.seek(0)
-
+    file.seek(0) # Reset file pointer to beginning for saving
+    
     if file_size > MAX_FILE_SIZE:
-        error_msg = f'File size exceeds the limit of {MAX_FILE_SIZE / (1024 * 1024):.0f} MB.'
-        flash(error_msg, 'error')
-        return error_msg, 413
+        flash(f'File size exceeds {MAX_FILE_SIZE / (1024*1024)}MB limit.', 'error')
+        return "File too large", 413
+
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        
-        # Clean up old files in the upload folder
-        for existing_file in os.listdir(app.config['UPLOAD_FOLDER']):
-            os.remove(os.path.join(app.config['UPLOAD_FOLDER'], existing_file))
-            
-        file.save(filepath)
-
-        try:
-            img = Image.open(filepath)
-            full_document_text = []
-            
-            tess_config = f'--psm {ocr_psm}'
-
-            for i in range(img.n_frames):
-                img.seek(i) 
-                current_img = img.copy() 
-                current_img = preprocess_image(current_img) 
-
-                page_text = pytesseract.image_to_string(current_img, lang=ocr_language, config=tess_config)
-                
-                full_document_text.append(f"\n--- PAGE {i + 1} ---\n\n" + page_text)
-
-            extracted_text = "\n\n".join(full_document_text)
-
-            session['ocr_text'] = extracted_text
-            session['last_language'] = ocr_language 
-            
-            flash(f"Successfully scanned '{filename}' ({img.n_frames} page(s)).", 'success')
-            
-            # --- FIX: GET AND RETURN IMAGE URL ---
-            image_url = url_for('uploaded_file', filename=filename) 
-
-            return jsonify({
-                'text': extracted_text, 
-                'filename': filename,
-                'image_url': image_url # <-- NEW: URL for frontend to display image
-            }), 200
-
-        except TesseractNotFoundError:
-            error_msg = f"Tesseract not found. Path: {pytesseract.pytesseract.tesseract_cmd}. Check your .env file."
-            flash(error_msg, 'error')
-            return error_msg, 500 
-            
-        except Exception as e:
-            error_msg = f'OCR failed (Language: {ocr_language}, PSM: {ocr_psm}). Error: {str(e)}'
-            flash(error_msg, 'error')
-            return error_msg, 500
-    
-    flash('File type not allowed.', 'error')
-    return 'File type not allowed', 400
-
-# ------------------------------------------------------------------
-# --- Route for PDF Generation (Uses Font Selection) ---
-# ------------------------------------------------------------------
-@app.route('/generate_pdf', methods=['POST'])
-def generate_pdf():
-    """Takes the edited text and generates a PDF document."""
-    edited_text = request.form.get('edited_text', '')
-    download_name = request.form.get('download_name', 'scanned_document.pdf')
-    pdf_font = request.form.get('pdf_font', 'Arial') 
-
-    if not edited_text:
-        flash('No text provided for PDF generation.', 'warning')
-        return 'No text provided for PDF generation.', 400
-
     try:
-        base_name = download_name.replace('.pdf', '')
-        session['last_pdf_title'] = base_name
+        file.save(filepath)
         
-        pdf = FPDF('P', 'mm', 'A4') 
-        pdf.add_page()
-        pdf.set_font(pdf_font, size=12)
+        lang = request.form.get('language', 'eng')
+        psm = request.form.get('psm', '3')
         
-        safe_text = edited_text.encode('latin-1', 'replace').decode('latin-1')
-        
-        pdf.multi_cell(0, 10, safe_text, align='J') 
+        # Perform OCR
+        ocr_text = perform_ocr(filepath, lang, psm)
 
-        pdf_output = pdf.output(dest='S').encode('latin-1')
+        if ocr_text is None:
+            return "OCR Processing Failed", 500
+
+        # --- Image Preview Logic (First Page Only) ---
+        preview_filename = filename
         
-        flash(f"Successfully generated PDF: {download_name} (Font: {pdf_font}).", 'success')
-        return send_file(
-            io.BytesIO(pdf_output),
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=download_name
-        )
+        # If it's a multi-page file (PDF, TIFF), create a PNG preview of the first page
+        is_multipage = filename.lower().endswith(('.pdf', '.tif', '.tiff'))
+        
+        if is_multipage:
+            # Create a unique name for the preview image to avoid conflicts
+            unique_id = os.urandom(8).hex()
+            preview_filename = f"{filename.rsplit('.', 1)[0]}_{unique_id}.png"
+            preview_filepath = os.path.join(app.config['UPLOAD_FOLDER'], preview_filename)
+            
+            try:
+                # Open and target the first page (frame)
+                with Image.open(filepath) as img:
+                    if hasattr(img, 'n_frames') and img.n_frames > 1:
+                        img.seek(0) # Ensure it's the first page
+                    
+                    # Convert to RGB and save the first frame as PNG
+                    img.convert('RGB').save(preview_filepath) 
+                
+            except Exception as e:
+                logger.warning(f"Could not create preview image for {filename}: {e}")
+                # Fallback: if preview generation fails, use a placeholder or the original filename
+                preview_filename = filename # Fallback to original, hoping browser can display it
+        
+        # Determine base title for PDF
+        pdf_title_base = filename.rsplit('.', 1)[0]
+        
+        # Set cookies and return JSON response
+        response_data = {
+            'status': 'success', 
+            'text': ocr_text, 
+            'filename': preview_filename 
+        }
+        response = make_response(json.dumps(response_data), 200)
+        response.headers['Content-Type'] = 'application/json'
+        
+        # Set cookies for persistence
+        response.set_cookie('last_language', lang, max_age=30*24*60*60) # 30 days
+        response.set_cookie('last_pdf_title', pdf_title_base, max_age=30*24*60*60)
+        
+        return response
 
     except Exception as e:
-        error_msg = f'PDF generation failed: {str(e)}'
-        flash(error_msg, 'error')
-        return error_msg, 500
+        logger.error(f"Server Error during upload: {e}")
+        flash(f'A server processing error occurred: {e}', 'error')
+        return "Server Error", 500
 
-# --- Serve uploaded files ---
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
-# --- Run the App ---
+@app.route('/generate_pdf', methods=['POST'])
+def generate_pdf():
+    """Generates a PDF from the edited text and triggers download."""
+    edited_text = request.form.get('edited_text')
+    download_name = request.form.get('download_name', 'scanned_document.pdf')
+    pdf_font = request.form.get('pdf_font', 'Arial')
+
+    if not edited_text:
+        return "No text provided for PDF generation.", 400
+
+    try:
+        # Use Helvetica if Arial is requested, as Helvetica is the fpdf built-in default closest to Arial
+        font_map = {'Times': 'Times', 'Courier': 'Courier', 'Arial': 'Helvetica'}
+        font_name = font_map.get(pdf_font, 'Helvetica')
+        
+        pdf = FPDF(unit='mm', format='A4')
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.set_font(font_name, size=12)
+
+        # --- Robustly parse custom page separators from frontend ---
+        
+        # 1. Replace the long separator lines with a simple, consistent marker
+        text_with_markers = edited_text.replace(
+            "======================================================\n",
+            "---PDF_PAGE_BREAK---"
+        )
+        # Remove the second marker that often follows
+        text_with_markers = text_with_markers.replace("---PDF_PAGE_BREAK---", "", 1)
+        
+        # 2. Split the text blocks based on the remaining markers
+        text_blocks = text_with_markers.split("---PDF_PAGE_BREAK---")
+
+        if len(text_blocks) == 1 and text_blocks[0].strip() == "":
+            # Handle case where input text is just empty space/separators
+            text_blocks = [edited_text] # Revert to original if no block found
+        
+        # Process pages
+        for block_content in text_blocks:
+            block = block_content.strip()
+            if not block:
+                continue
+
+            pdf.add_page()
+            
+            # Attempt to separate the custom header line from the actual content
+            lines = block.split('\n', 1)
+            
+            # Check if the first line is clearly a page/appended marker
+            if '--- PAGE' in lines[0] or '--- APPENDED PAGE' in lines[0]:
+                header = lines[0].strip()
+                content = lines[1].strip() if len(lines) > 1 else ''
+            else:
+                header = ''
+                content = block
+
+            if header:
+                # Write page header
+                pdf.set_font(font_name, 'B', 12) # Kept at 12 to fit more text
+                pdf.cell(0, 10, header, 0, 1, 'C')
+                pdf.set_font(font_name, size=12)
+                pdf.ln(2) # Smaller line break after header
+
+            # Write content
+            if content:
+                pdf.multi_cell(0, 5, content) # Use multi_cell for wrapping long text
+
+        # Output the PDF to a memory buffer
+        pdf_output = pdf.output(dest='S').encode('latin-1')
+        
+        # Create a Flask response with the PDF data
+        response = make_response(pdf_output)
+        response.headers['Content-Type'] = 'application/pdf'
+        response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
+        
+        # Update cookie for last used PDF title
+        response.set_cookie('last_pdf_title', download_name.replace('.pdf', ''), max_age=30*24*60*60)
+        
+        return response
+
+    except Exception as e:
+        logger.error(f"PDF Generation Error: {e}")
+        flash('PDF creation failed. Please check the console for details.', 'error')
+        return "PDF Generation Failed", 500
+
+# --- RUN THE APP ---
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5000)
