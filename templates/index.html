@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image to Editable PDF Converter</title>
+    <style>
+        /* Minimal CSS for a clean look */
+        body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1 { text-align: center; }
+        .container { border: 1px solid #ccc; padding: 20px; border-radius: 8px; }
+        #ocrText { width: 100%; height: 300px; padding: 10px; box-sizing: border-box; resize: vertical; margin-bottom: 10px; }
+        .button-group { display: flex; justify-content: space-between; margin-top: 15px; }
+        button, input[type="file"] { padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; }
+        #uploadBtn { background-color: #007bff; color: white; }
+        #pdfBtn { background-color: #28a745; color: white; display: none; } /* Hidden until OCR is done */
+        .loading { color: #007bff; margin-top: 10px; display: none; }
+    </style>
+</head>
+<body>
+    <h1>🖼️ Image to Editable PDF 📝</h1>
+
+    <div class="container">
+        <h2>1. Upload Image for Scanning</h2>
+        <input type="file" id="imageFile" accept="image/*">
+        <button id="uploadBtn">Scan Image (OCR)</button>
+        <div class="loading" id="loadingMessage">Processing image... Please wait.</div>
+
+        <hr>
+
+        <h2>2. Edit Scanned Text</h2>
+        <textarea id="ocrText" placeholder="The extracted text will appear here. Edit it as needed." disabled></textarea>
+
+        <div class="button-group">
+            <button id="pdfBtn">3. Convert Edited Text to PDF</button>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('uploadBtn').addEventListener('click', async () => {
+            const fileInput = document.getElementById('imageFile');
+            const file = fileInput.files[0];
+            const ocrTextarea = document.getElementById('ocrText');
+            const pdfButton = document.getElementById('pdfBtn');
+            const loadingMessage = document.getElementById('loadingMessage');
+
+            if (!file) {
+                alert('Please select an image file first.');
+                return;
+            }
+
+            // Show loading state
+            loadingMessage.style.display = 'block';
+            ocrTextarea.disabled = true;
+            pdfButton.style.display = 'none';
+            ocrTextarea.value = '';
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    const text = await response.text();
+                    ocrTextarea.value = text;
+                    ocrTextarea.disabled = false;
+                    pdfButton.style.display = 'block';
+                } else {
+                    // Display the specific error message from the backend (Tesseract Not Found)
+                    const error = await response.text();
+                    alert('Error during OCR: ' + error);
+                    ocrTextarea.value = 'OCR failed. Check console for details.';
+                }
+            } catch (error) {
+                console.error('Fetch error:', error);
+                alert('A network error occurred: ' + error.message);
+            } finally {
+                loadingMessage.style.display = 'none';
+            }
+        });
+
+        document.getElementById('pdfBtn').addEventListener('click', async () => {
+            const editedText = document.getElementById('ocrText').value;
+
+            if (!editedText.trim()) {
+                alert('The text area is empty. Nothing to convert.');
+                return;
+            }
+
+            // Create a temporary form to submit the edited text
+            const tempForm = document.createElement('form');
+            tempForm.method = 'POST';
+            tempForm.action = '/generate_pdf';
+
+            // Add the text as a hidden field
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'edited_text';
+            input.value = editedText;
+
+            tempForm.appendChild(input);
+
+            // Submit the form to trigger the file download
+            document.body.appendChild(tempForm);
+            tempForm.submit();
+            document.body.removeChild(tempForm); // Clean up
+        });
+
+    </script>
+</body>
+</html>

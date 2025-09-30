@@ -1,5 +1,3 @@
-
-
 import os
 from flask import Flask, render_template, request, send_file, session
 from PIL import Image
@@ -8,9 +6,32 @@ from fpdf import FPDF
 import io
 from werkzeug.utils import secure_filename
 
+# Import the specific error for better handling
+from pytesseract.pytesseract import TesseractNotFoundError
+
 # --- Configuration ---
 # !!! IMPORTANT: UPDATE THIS PATH TO YOUR TESSERACT INSTALLATION !!!
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Define potential Tesseract paths for robustness on Windows
+TESSERACT_PATHS = [
+    r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+    r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+]
+
+# Set pytesseract path by checking which path exists
+tesseract_found = False
+for path in TESSERACT_PATHS:
+    if os.path.exists(path):
+        pytesseract.pytesseract.tesseract_cmd = path
+        tesseract_found = True
+        break
+
+# If Tesseract wasn't found in common paths, fall back to the primary path 
+# (This still relies on the user to ensure Tesseract is installed correctly)
+if not tesseract_found:
+    print("Warning: Tesseract not automatically found. Please ensure it is installed and the path is correct in app.py.")
+    # Default to the primary path, which will likely cause TesseractNotFoundError if wrong.
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATHS[0]
+
 
 app = Flask(__name__)
 # Use a secret key for session management (required for Flask's session)
@@ -68,9 +89,18 @@ def upload_file():
             # Return the extracted text to the frontend for editing
             return extracted_text
 
+        # -----------------------------------------------------------
+        # Catch TesseractNotFoundError specifically for a clear message
+        # -----------------------------------------------------------
+        except TesseractNotFoundError:
+            # Note: This path will be the one currently configured in pytesseract.
+            error_msg = f"Tesseract not found. Please verify the path in app.py. Current path: {pytesseract.pytesseract.tesseract_cmd}"
+            # Return error message with 500 status code
+            return error_msg, 500 
+            
         except Exception as e:
-            # Error handling for Tesseract issues
-            return f'OCR failed: {str(e)}. Check Tesseract path and installation.', 500
+            # Catch other potential errors (like Pillow image handling errors)
+            return f'OCR failed due to an unknown error: {str(e)}', 500
     
     return 'File type not allowed', 400
 
@@ -97,10 +127,11 @@ def generate_pdf():
         # 3. Write the text to the PDF
         # MultiCell is used to handle line breaks and text wrapping
         # 0=auto width, 10=height of lines, align='J' for Justify
+        # The .encode() and .decode() are for robust character handling in fpdf2
         pdf.multi_cell(0, 10, edited_text.encode('latin-1', 'replace').decode('latin-1'), align='J') 
 
         # 4. Save the PDF to an in-memory buffer
-        # This prevents saving to the disk and allows direct sending to the user
+        # 'S' means return as a string/bytes buffer
         pdf_output = pdf.output(dest='S').encode('latin-1')
         
         # 5. Send the file back to the client
