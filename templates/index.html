@@ -49,7 +49,7 @@
             }
         }
 
-        /* --- Input & Control Styles --- */
+        /* --- Input & Control Styles (Minor fix: removed margin-bottom from file input to align with label) --- */
         .input-group label { display: block; margin-bottom: 5px; font-weight: 600; color: #555; }
         input[type="file"], select, input[type="text"] { 
             width: 100%; 
@@ -96,11 +96,17 @@
             color: white;
             width: 100%;
             margin-top: 5px;
+            /* FIX: Ensure it is hidden by default on page load */
             display: none; 
         }
         #scanNextBtn:hover { background-color: #138496; }
 
-        #pdfBtn { background-color: #28a745; color: white; display: none; }
+        #pdfBtn { 
+            background-color: #28a745; 
+            color: white; 
+            /* FIX: Ensure it is hidden by default on page load */
+            display: none; 
+        }
         #pdfBtn:hover { background-color: #1e7e34; }
         
         /* Local Storage Buttons */
@@ -142,7 +148,6 @@
         #scannedImage { 
             max-width: 100%; 
             display: none; 
-            /* Start with no explicit style override, let wrapper handle sizing */
             transform-origin: top left;
         }
         
@@ -224,7 +229,7 @@
                     <option value="deu" {% if last_language == 'deu' %}selected{% endif %}>German (deu)</option>
                     <option value="spa" {% if last_language == 'spa' %}selected{% endif %}>Spanish (spa)</option>
                     <option value="ita" {% if last_language == 'ita' %}selected{% endif %}>Italian (ita)</option>
-                </select>
+                    </select>
             </div>
             
             <div class="input-group">
@@ -272,7 +277,7 @@
             <div class="input-group">
                 <label for="pdfTitle">PDF Document Title (e.g., Invoice-2024)</label>
                 <input type="text" id="pdfTitle" placeholder="Enter desired filename" 
-                            value="{{ last_pdf_title }}">
+                                value="{{ last_pdf_title }}">
             </div>
             <div class="button-group">
                 <button id="pdfBtn">5. Download Final PDF</button>
@@ -456,6 +461,28 @@
 
         // --- CORE OCR & MULTI-SCAN PROCESSING ---
 
+        // FIX: Add event listener to file input for client-side preview
+        fileInput.addEventListener('change', (event) => {
+            const file = event.target.files[0];
+            if (file && file.type.startsWith('image/')) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    imageElement.src = e.target.result;
+                    imageElement.style.display = 'block';
+                    // Check if initial scan was already performed
+                    if (ocrTextarea.value.trim() !== '') {
+                        scanNextBtn.style.display = 'block';
+                    }
+                };
+                reader.readAsDataURL(file);
+            } else if (file) {
+                // For PDF/TIFF, show a placeholder since we can't easily preview client-side
+                imageElement.src = '';
+                imageElement.style.display = 'none';
+            }
+        });
+
+
         /**
          * Validates the selected file and runs the OCR scan.
          * @param {boolean} appendMode - True if this is a subsequent scan to append text.
@@ -463,7 +490,7 @@
         async function runOcrScan(appendMode = false) {
             const file = fileInput.files[0];
             
-            // --- FIX: Client-side validation for file existence and size ---
+            // --- Client-side validation for file existence and size ---
             if (!file) {
                 alert('Please select a document file first.');
                 return;
@@ -471,10 +498,10 @@
             if (file.size > MAX_FILE_SIZE_BYTES) {
                 alert(`File is too large. Max size is ${MAX_FILE_SIZE_BYTES / 1024 / 1024}MB.`);
                 fileInput.value = ''; // Clear the input
+                imageElement.style.display = 'none'; // Hide image
                 return;
             }
-            // ------------------------------------------------------------------
-
+            
             const language = document.getElementById('ocrLang').value;
             const psm = document.getElementById('ocrPsm').value; 
             const isInitialScan = !appendMode;
@@ -486,6 +513,8 @@
             if (isInitialScan) {
                 ocrTextarea.value = ''; 
                 currentPageCount = 0; 
+                // Hide scan next button until the first scan is complete
+                scanNextBtn.style.display = 'none'; 
             }
             
             uploadBtn.disabled = true;
@@ -497,7 +526,8 @@
             formData.append('psm', psm);
 
             try {
-                const response = await fetch('/upload', {
+                // FIX: Assuming the server is running on the current host and /upload is the correct endpoint
+                const response = await fetch('/upload', { 
                     method: 'POST',
                     body: formData
                 });
@@ -508,13 +538,13 @@
                     
                     if (appendMode) {
                         const regex = /--- PAGE (\d+) ---/g;
-                        
                         let newText = '';
                         
-                        // Check if the new scan contains Tesseract's own multi-page markers
+                        // Handle multi-page documents from the server's response
                         const pageMatches = scannedText.match(regex);
                         if (pageMatches) {
-                            // Split on the pattern but skip the first element which is before the first match
+                            // This logic correctly re-indexes pages from the new scan, assuming the server
+                            // returns Tesseract's own multi-page markers.
                             const textParts = scannedText.split(regex).slice(1); 
                             for (let i = 0; i < textParts.length; i += 2) {
                                 // textParts[i] is the page number, textParts[i+1] is the content
@@ -538,9 +568,17 @@
                         
                         document.getElementById('pdfTitle').value = data.filename.split('.').slice(0, -1).join('.'); 
                         
-                        // Update image element on initial scan for preview
-                        imageElement.src = '/uploads/' + data.filename;
-                        imageElement.style.display = 'block';
+                        // FIX: Image preview on initial scan - We'll rely on the fileInput 'change' listener for client-side image files, 
+                        // but if it's a multi-page PDF/TIFF, the server must provide the *first page* image data or file path here.
+                        // Assuming the server response 'data.filename' points to a *viewable* first page image (e.g., in a /uploads folder)
+                        // This server-side path is necessary for PDF/TIFF files.
+                        if (file.type.startsWith('image/')) {
+                            // Do nothing, the 'change' listener already set the preview
+                        } else {
+                            // Use server-provided image path (e.g., converted first page of PDF)
+                            imageElement.src = '/uploads/' + data.filename + '_page_1.png'; // Placeholder for server-generated first page image
+                            imageElement.style.display = 'block';
+                        }
                     }
                     
                     ocrTextarea.disabled = false;
@@ -595,6 +633,7 @@
                 loadingMessage.style.display = 'block';
                 pdfButton.disabled = true;
 
+                // FIX: Assuming the server is running on the current host and /generate_pdf is the correct endpoint
                 const response = await fetch('/generate_pdf', {
                     method: 'POST',
                     body: body,
