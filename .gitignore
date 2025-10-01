@@ -25,7 +25,7 @@ uploads/
 # --------------------
 # CODE MISTAKE FIXES
 # --------------------
-# ⚠️ FIX: DO NOT exclude your main application code!
+# FIX: DO NOT exclude your main application code!
 # The entry: .app.py was removed
 
 # --------------------
