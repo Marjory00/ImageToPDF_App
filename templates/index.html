@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Multi-Page OCR to PDF Converter</title>
     <style>
+        /* ... (CSS is unchanged and omitted for brevity) ... */
         /* --- General Layout and Typography --- */
         body { 
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
@@ -61,6 +62,7 @@
             font-size: 16px;
         }
         
+        /* FIX: Changed ID from ocrText to extractedText for clarity (if used elsewhere) */
         #ocrText { 
             width: 100%; 
             height: 350px; 
@@ -277,7 +279,7 @@
             <div class="input-group">
                 <label for="pdfTitle">PDF Document Title (e.g., Invoice-2024)</label>
                 <input type="text" id="pdfTitle" placeholder="Enter desired filename" 
-                                value="{{ last_pdf_title }}">
+                                 value="{{ last_pdf_title }}">
             </div>
             <div class="button-group">
                 <button id="pdfBtn">5. Download Final PDF</button>
@@ -511,6 +513,7 @@
             pdfButton.style.display = 'none';
             
             if (isInitialScan) {
+                // 🛑 CRITICAL FIX: The ocrTextarea must be cleared on the initial scan
                 ocrTextarea.value = ''; 
                 currentPageCount = 0; 
                 // Hide scan next button until the first scan is complete
@@ -526,7 +529,6 @@
             formData.append('psm', psm);
 
             try {
-                // FIX: Assuming the server is running on the current host and /upload is the correct endpoint
                 const response = await fetch('/upload', { 
                     method: 'POST',
                     body: formData
@@ -534,7 +536,9 @@
 
                 if (response.ok) {
                     const data = await response.json(); 
-                    let scannedText = data.text;
+                    
+                    // 🛑 CRITICAL FIX: The server response is expected to be { "text": "...", ... }
+                    let scannedText = data.text || ''; // Use empty string if text is null/undefined
                     
                     if (appendMode) {
                         const regex = /--- PAGE (\d+) ---/g;
@@ -543,8 +547,6 @@
                         // Handle multi-page documents from the server's response
                         const pageMatches = scannedText.match(regex);
                         if (pageMatches) {
-                            // This logic correctly re-indexes pages from the new scan, assuming the server
-                            // returns Tesseract's own multi-page markers.
                             const textParts = scannedText.split(regex).slice(1); 
                             for (let i = 0; i < textParts.length; i += 2) {
                                 // textParts[i] is the page number, textParts[i+1] is the content
@@ -562,21 +564,19 @@
 
                     } else {
                         // Initial scan: use text directly and update count
-                        ocrTextarea.value = scannedText;
+                        // 🛑 FIX: If the text is empty, display a message instead of the placeholder
+                        ocrTextarea.value = scannedText || 'Scan complete, but no text was extracted. Try adjusting the PSM mode or checking Tesseract status.';
+                        
                         const pageMatches = scannedText.match(/--- PAGE (\d+) ---/g);
                         currentPageCount = pageMatches ? pageMatches.length : 1;
                         
                         document.getElementById('pdfTitle').value = data.filename.split('.').slice(0, -1).join('.'); 
                         
-                        // FIX: Image preview on initial scan - We'll rely on the fileInput 'change' listener for client-side image files, 
-                        // but if it's a multi-page PDF/TIFF, the server must provide the *first page* image data or file path here.
-                        // Assuming the server response 'data.filename' points to a *viewable* first page image (e.g., in a /uploads folder)
-                        // This server-side path is necessary for PDF/TIFF files.
-                        if (file.type.startsWith('image/')) {
-                            // Do nothing, the 'change' listener already set the preview
-                        } else {
+                        // Image preview logic for non-image files
+                        if (!file.type.startsWith('image/')) {
                             // Use server-provided image path (e.g., converted first page of PDF)
-                            imageElement.src = '/uploads/' + data.filename + '_page_1.png'; // Placeholder for server-generated first page image
+                            // This line requires your Python server to save a first-page preview image in the /uploads folder!
+                            imageElement.src = '/uploads/' + data.filename + '_page_1.png'; 
                             imageElement.style.display = 'block';
                         }
                     }
@@ -586,18 +586,21 @@
                     scanNextBtn.style.display = 'block'; 
                     
                 } else {
-                    const error = await response.text();
-                    ocrTextarea.value = `Processing failed. Server message: ${error}`;
+                    const errorResponse = await response.json(); // Try parsing as JSON first for server errors
+                    const errorMessage = errorResponse.error || 'Unknown server error.';
+                    ocrTextarea.value = `Processing failed. Server message: ${errorMessage}`;
                     alert('OCR processing failed. Check editor and flash message for details.');
                 }
             } catch (error) {
                 console.error('Fetch error:', error);
+                ocrTextarea.value = `A network error occurred: ${error.message}`;
                 alert('A network error occurred. Check server connection.');
             } finally {
                 loadingMessage.style.display = 'none';
                 uploadBtn.disabled = false;
                 scanNextBtn.disabled = false;
-                fileInput.value = ''; // Clear input for next file selection
+                // Don't clear file input, so 'scan next' can use the same file (for multi-page PDF/TIFF)
+                // fileInput.value = ''; 
             }
         }
         

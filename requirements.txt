@@ -6,3 +6,5 @@ Pillow
 pytesseract
 fpdf2
 Flask-Limiter  # Include Flask-Limiter since you've been configuring it
+gunicorn
+reportlab
