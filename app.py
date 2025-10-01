@@ -1,29 +1,29 @@
+# app.py
+
 import os
 import json
 import logging
 import datetime
-from dotenv import load_dotenv # type: ignore
+import threading
+from dotenv import load_dotenv
 from flask import Flask, request, render_template, send_from_directory, flash, make_response, abort
 import pytesseract
 import fitz   # type: ignore
-from PIL import Image # Needed for type hint in worker
-# We can remove PIL imports if not used outside the worker/utils, 
-# but keep them here for visibility and error handling context
+from PIL import Image
 from PIL import UnidentifiedImageError 
 
-import threading
 from flask_limiter import Limiter # type: ignore
 from flask_limiter.util import get_remote_address # type: ignore
+from fpdf import FPDF 
 
 import utils 
 import security 
-from config import get_config # 🚀 NEW: Import configuration management
+from config import get_config 
 
 # --- CONFIGURATION & INITIALIZATION ---
 
 load_dotenv() 
 
-# 🎯 NEW: Load configuration based on environment
 app_config = get_config() 
 
 # Tesseract Configuration
@@ -36,13 +36,13 @@ if TESSERACT_PATH != 'tesseract':
 try:
     pytesseract.get_tesseract_version()
     TESSERACT_OK = True
-    TESSERASS_STATUS = f"Tesseract found at: {pytesseract.pytesseract.tesseract_cmd}"
+    # FIX: Corrected typo from TESSERASS_STATUS to TESSERACT_STATUS
+    TESSERACT_STATUS = f"Tesseract found at: {pytesseract.pytesseract.tesseract_cmd}"
 except pytesseract.TesseractNotFoundError:
     TESSERACT_OK = False
-    TESSERASS_STATUS = "Tesseract not found. Please install it or set the TESSERACT_CMD environment variable."
+    TESSERACT_STATUS = "Tesseract not found. Please install it or set the TESSERACT_CMD environment variable."
 
 app = Flask(__name__)
-# 🎯 NEW: Apply config from the object
 app.config.from_object(app_config) 
 
 # Pass configurations to utility and security modules
@@ -53,7 +53,8 @@ app_config_data = {
     'MAX_FILE_SIZE': app_config.MAX_FILE_SIZE
 }
 utils.configure_utils(app_config_data, TESSERACT_PATH, TESSERACT_OK)
-security.configure_security(app_config.UPLOAD_FOLDER) 
+# FIX: Pass the required max_filename_length argument
+security.configure_security(app_config.UPLOAD_FOLDER, app_config.MAX_FILENAME_LENGTH) 
 
 os.makedirs(app_config.UPLOAD_FOLDER, exist_ok=True)
 
@@ -65,8 +66,8 @@ logger = logging.getLogger(__name__)
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
-    # 🎯 NEW: Use limits from the config
-    default_limits=app_config.LIMITER_DEFAULT_LIMITS
+    # Pass the tuple of limits directly
+    default_limits=app_config.LIMITER_DEFAULT_LIMITS 
 )
 
 # Mock Task Queue storage (in-memory dictionary)
@@ -88,19 +89,26 @@ def ocr_worker(task_id, filepath, lang, psm, original_filename):
         if is_multipage:
             try:
                 preview_id = os.urandom(8).hex()
-                preview_filename = f"{original_filename.rsplit('.', 1)[0]}_{preview_id}.png"
-                preview_filename = security.validate_and_secure_filename(preview_filename) 
+                # Create a secured name for the preview image
+                preview_base_name = original_filename.rsplit('.', 1)[0]
+                preview_filename = f"{preview_base_name}.png" 
+                # Use the unique ID feature of get_unique_filename for the preview
+                # Note: validate_and_secure_filename expects a file extension, so we add .png
+                secured_preview_filename = security.validate_and_secure_filename(preview_filename, unique_id=preview_id)
                 
-                if preview_filename:
-                    preview_filepath = os.path.join(app_config.UPLOAD_FOLDER, preview_filename)
+                if secured_preview_filename:
+                    preview_filepath = os.path.join(app_config.UPLOAD_FOLDER, secured_preview_filename)
+                    preview_filename = secured_preview_filename # Update for the response dict
                     
                     doc = fitz.open(filepath)
                     if doc.page_count > 0:
                         page = doc.load_page(0)
+                        # Use a higher DPI for better preview quality
                         pix = page.get_pixmap(dpi=150) 
                         pix.save(preview_filepath)
                     doc.close()
                 else:
+                    # Fallback to original filename if securing the preview name failed
                     preview_filename = original_filename 
             except Exception as e:
                 logger.warning(f"Could not create preview image for {original_filename}: {e}")
@@ -114,6 +122,7 @@ def ocr_worker(task_id, filepath, lang, psm, original_filename):
         }
     
     logger.info(f"Task {task_id}: Finished.")
+    # We only delete the original uploaded file, not the preview file (which might have a different name)
     utils.delete_file(os.path.basename(filepath))
 
 
@@ -129,7 +138,8 @@ def index():
     return render_template(
         'index.html',
         tesseract_ok=TESSERACT_OK,
-        tesseract_status=TESSERASS_STATUS,
+        # FIX: Use corrected variable name TESSERACT_STATUS
+        tesseract_status=TESSERACT_STATUS,
         last_language=request.cookies.get('last_language', 'eng'),
         last_pdf_title=request.cookies.get('last_pdf_title', ''),
         current_year=current_year
@@ -137,6 +147,7 @@ def index():
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
+    # security.is_safe_to_serve already ensures the file is in the upload folder
     if not security.is_safe_to_serve(filename):
         abort(404) 
 
@@ -144,6 +155,7 @@ def uploaded_file(filename):
 
 @app.route('/delete_preview/<filename>', methods=['POST'])
 def delete_preview(filename):
+    # The is_safe_to_serve check prevents path traversal
     if not security.is_safe_to_serve(filename):
         return json.dumps({'status': 'error', 'message': 'Invalid file reference.'}), 400
         
@@ -153,7 +165,6 @@ def delete_preview(filename):
 
 
 @app.route('/upload', methods=['POST'])
-# 🎯 NEW: Use limits from the config
 @limiter.limit(app_config.LIMITER_OCR_ROUTE_LIMITS, override_defaults=True) 
 def upload_file():
     if not TESSERACT_OK:
@@ -180,14 +191,16 @@ def upload_file():
     file.seek(0)
     
     if file_size > app_config.MAX_FILE_SIZE:
-        flash(f'File size exceeds {app_config.MAX_FILE_SIZE / (1024*1024)}MB limit.', 'error')
+        # FIX: Format the size limit in MB for a user-friendly message
+        size_limit_mb = round(app_config.MAX_FILE_SIZE / (1024 * 1024))
+        flash(f'File size exceeds {size_limit_mb}MB limit.', 'error')
         return json.dumps({'status': 'error', 'message': 'File too large'}), 413
 
     task_id, safe_filename = security.get_unique_filename(original_filename)
 
     if not safe_filename:
-         logger.error(f"Failed to generate safe filename for: {original_filename}")
-         return json.dumps({'status': 'error', 'message': 'Failed to process file name.'}), 500
+        logger.error(f"Failed to generate safe filename for: {original_filename}")
+        return json.dumps({'status': 'error', 'message': 'Failed to process file name.'}), 500
 
     filepath = os.path.join(app_config.UPLOAD_FOLDER, safe_filename)
     
@@ -215,11 +228,11 @@ def upload_file():
         return response 
 
     except Exception as e:
-        logger.error(f"Server Error during upload: {e}")
+        logger.error(f"Server Error during upload: {e}", exc_info=True)
         if os.path.exists(filepath):
             utils.delete_file(safe_filename)
             
-        return json.dumps({'status': 'error', 'message': f'A server processing error occurred: {e}'}), 500
+        return json.dumps({'status': 'error', 'message': f'A server processing error occurred: {type(e).__name__}'}), 500
 
 
 @app.route('/status/<task_id>', methods=['GET'])
@@ -237,12 +250,14 @@ def get_status(task_id):
     if task['status'] == 'failed':
         flash(f"OCR Task Failed: {task['data'].get('message', 'Unknown error.')}", 'error')
         with task_lock:
-             del task_results[task_id]
+            # FIX: Delete task after reporting failure to prevent repeat reporting
+            del task_results[task_id]
         return json.dumps(task), 200 
     
     if task['status'] == 'complete':
         with task_lock:
-             del task_results[task_id]
+            # FIX: Delete task after returning success to clean up memory
+            del task_results[task_id]
         
         response_data = {
             'status': 'success',
@@ -268,14 +283,15 @@ def generate_pdf():
         font_map = {'Times': 'Times', 'Courier': 'Courier', 'Arial': 'Helvetica'}
         font_name = font_map.get(pdf_font, 'Helvetica')
         
-        pdf = FPDF(unit='mm', format='A4') # type: ignore
+        # FIX: Correct FPDF instantiation to be compatible with fpdf2
+        pdf = FPDF(unit='mm', format='A4')
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.set_font(font_name, size=12)
 
-        text_with_markers = edited_text.replace(
-            "======================================================\n",
-            "---PDF_PAGE_BREAK---"
-        )
+        # Logic to handle page break markers
+        marker = "======================================================\n"
+        text_with_markers = edited_text.replace(marker, "---PDF_PAGE_BREAK---")
+        # Remove the first occurrence of the marker if it exists, as the first page is added automatically
         text_with_markers = text_with_markers.replace("---PDF_PAGE_BREAK---", "", 1)
         
         text_blocks = text_with_markers.split("---PDF_PAGE_BREAK---")
@@ -290,15 +306,17 @@ def generate_pdf():
 
             pdf.add_page()
             
+            # Separate potential header line from content
             lines = block.split('\n', 1)
             
-            if '--- PAGE' in lines[0] or '--- APPENDED PAGE' in lines[0]:
+            header = ''
+            content = block # Default content is the whole block
+            
+            # Check if the first line looks like a header (e.g., from multi-page OCR)
+            if len(lines) > 1 and ('--- PAGE' in lines[0] or '--- APPENDED PAGE' in lines[0]):
                 header = lines[0].strip()
-                content = lines[1].strip() if len(lines) > 1 else ''
-            else:
-                header = ''
-                content = block
-
+                content = lines[1].strip()
+            
             if header:
                 pdf.set_font(font_name, 'B', 12) 
                 pdf.cell(0, 10, header, 0, 1, 'C')
@@ -308,6 +326,8 @@ def generate_pdf():
             if content:
                 pdf.multi_cell(0, 5, content) 
 
+        # FIX: Use .output(dest='S') which returns bytes for Flask make_response
+        # Encoding to latin-1 is standard for fpdf2 output
         pdf_output = pdf.output(dest='S').encode('latin-1')
         
         response = make_response(pdf_output)
@@ -319,11 +339,10 @@ def generate_pdf():
         return response
 
     except Exception as e:
-        logger.error(f"PDF Generation Error: {e}")
+        logger.error(f"PDF Generation Error: {e}", exc_info=True)
         flash('PDF creation failed. Please check the console for details.', 'error')
         return "PDF Generation Failed", 500
 
 # --- RUN THE APP ---
 if __name__ == '__main__':
-    # 🎯 NEW: Run in debug mode if configured for development
     app.run(debug=app_config.DEBUG, port=5000)

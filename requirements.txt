@@ -1,5 +1,8 @@
+# requirements.txt
+# Python dependencies for the ImageToPDF_App
 
 Flask
 Pillow
 pytesseract
 fpdf2
+Flask-Limiter  # Include Flask-Limiter since you've been configuring it

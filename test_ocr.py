@@ -1,4 +1,3 @@
-
 # test_ocr.py
 
 import unittest
@@ -10,11 +9,13 @@ import logging
 
 # Ensure the parent directory is in the path to import sibling modules
 import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
+# FIX: Use the directory of this script to ensure local modules are found
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
 
 import utils
 import security
-from config import get_config, TestingConfig
+# FIX: Import the base Config as well for better patching logic
+from config import get_config, TestingConfig, Config
 
 # Set up logging for tests
 logging.basicConfig(level=logging.INFO)
@@ -35,7 +36,8 @@ class TestOCRAppCoreLogic(unittest.TestCase):
             'MAX_FILE_SIZE': cls.config.MAX_FILE_SIZE
         }, cls.config.TESSERACT_CMD, False) # Force Tesseract to NOT be OK for initial tests
         
-        security.configure_security(cls.TEST_UPLOAD_FOLDER)
+        # FIX: Pass the required max_filename_length to security.configure_security
+        security.configure_security(cls.TEST_UPLOAD_FOLDER, cls.config.MAX_FILENAME_LENGTH)
 
         # Create the test upload directory
         os.makedirs(cls.TEST_UPLOAD_FOLDER, exist_ok=True)
@@ -46,7 +48,9 @@ class TestOCRAppCoreLogic(unittest.TestCase):
         if os.path.exists(cls.TEST_UPLOAD_FOLDER):
             shutil.rmtree(cls.TEST_UPLOAD_FOLDER)
             
+# ------------------------------------------------------------------------------
 # --- UTILS TESTS ---
+# ------------------------------------------------------------------------------
 
     def test_01_allowed_file(self):
         """Test file extension validation."""
@@ -66,7 +70,7 @@ class TestOCRAppCoreLogic(unittest.TestCase):
         with open(old_file_path, 'w') as f:
             f.write("old data")
         
-        # Set modification time to be past the cleanup age (e.g., 2 hours ago)
+        # Set modification time to be past the cleanup age
         old_timestamp = datetime.now() - timedelta(seconds=self.config.CLEANUP_AGE_SECONDS + 10)
         os.utime(old_file_path, (old_timestamp.timestamp(), old_timestamp.timestamp()))
 
@@ -94,13 +98,16 @@ class TestOCRAppCoreLogic(unittest.TestCase):
         self.assertEqual(result['status'], 'error')
         self.assertIn('not installed correctly', result['message'])
 
+# ------------------------------------------------------------------------------
 # --- SECURITY TESTS ---
+# ------------------------------------------------------------------------------
 
-    def test_04_validate_and_secure_filename(self):
+    def test_04_validate_and_secure_filename_basic(self):
         """Test filename sanitization and security."""
         # Test basic security (directory traversal)
         unsafe_name = "../etc/passwd"
         safe_name = security.validate_and_secure_filename(unsafe_name)
+        self.assertIsNotNone(safe_name)
         self.assertNotIn('..', safe_name)
         self.assertNotIn('/', safe_name)
 
@@ -109,12 +116,30 @@ class TestOCRAppCoreLogic(unittest.TestCase):
         task_id = "a1b2c3d4e5f6g7h8"
         secured = security.validate_and_secure_filename(original_name, task_id)
         self.assertTrue(secured.startswith(task_id + '_'))
-        self.assertIn('MyDocument.pdf', secured) # secure_filename removes '!'
+        # NOTE: secure_filename removes '!' and converts to lowercase on some systems, 
+        # so check against a secured version of the name part.
+        self.assertIn('MyDocument.pdf', secured) 
 
         # Test reserved names
         self.assertIsNone(security.validate_and_secure_filename("CON.txt"))
 
-    def test_05_is_safe_to_serve(self):
+    def test_05_validate_and_secure_filename_truncation(self):
+        """Test filename truncation logic."""
+        # Temporarily increase max length for a clear truncation test
+        with patch.object(security, 'MAX_FILENAME_LENGTH', 20):
+            task_id = "a1b2c3d4e5f6g7h8" # Length 16
+            
+            # Max base name length = 20 - 16 (id) - 1 (sep) - 4 (ext .png) = -1 (will be 1)
+            # This case tests the minimal filename length fix (max_base_len = 1)
+            long_name = "ThisIsAVeryLongFileName.png"
+            secured = security.validate_and_secure_filename(long_name, task_id)
+            
+            # The resulting filename should be 'a1b2c3d4e5f6g7h8_T.png' (1 + 16 + 1 + 4 = 22)
+            self.assertEqual(len(secured), 22)
+            self.assertEqual(secured, "a1b2c3d4e5f6g7h8_T.png")
+
+
+    def test_06_is_safe_to_serve(self):
         """Test security check against path escape (LFI protection)."""
         # Safe name test
         self.assertTrue(security.is_safe_to_serve("a1b2c3d4e5f6g7h8_my_file.png"))
@@ -123,9 +148,11 @@ class TestOCRAppCoreLogic(unittest.TestCase):
         self.assertFalse(security.is_safe_to_serve("../../../etc/passwd"))
         self.assertFalse(security.is_safe_to_serve("..\\..\\config.ini")) # Windows traversal
 
+# ------------------------------------------------------------------------------
 # --- CONFIG TESTS ---
+# ------------------------------------------------------------------------------
 
-    def test_06_config_loading(self):
+    def test_07_config_loading(self):
         """Test configuration object properties based on environment."""
         dev_config = get_config('development')
         self.assertTrue(dev_config.DEBUG)
@@ -135,14 +162,32 @@ class TestOCRAppCoreLogic(unittest.TestCase):
         self.assertTrue(test_config.TESTING)
         self.assertEqual(test_config.UPLOAD_FOLDER, 'test_uploads')
         
-        # Test production config requires a proper secret key (mock the OS env)
-        with self.assertRaises(Exception):
-            with patch.dict(os.environ, {'FLASK_ENV': 'production', 'FLASK_SECRET_KEY': TestingConfig.FLASK_SECRET_KEY}):
-                # Mock the base config fallback to trigger the exception
-                with patch.object(TestingConfig, 'FLASK_SECRET_KEY', 'default_fallback_secret_for_local_testing_only'):
-                     get_config('production') 
-
+    def test_08_production_secret_key_check(self):
+        """Test production config requires a proper secret key."""
+        # Set TESSERACT_CMD to a dummy value so that it doesn't fail the check
+        with patch.dict(os.environ, {'FLASK_ENV': 'production', 'TESSERACT_CMD': '/usr/bin/tesseract'}):
+            # 1. Test failure when using the default fallback secret
+            with patch.object(Config, 'FLASK_SECRET_KEY', 'default_fallback_secret_for_local_testing_only'):
+                 with self.assertRaisesRegex(Exception, 'FLASK_SECRET_KEY must be set in the production environment.'):
+                    get_config('production')
+            
+            # 2. Test success when using a proper secret
+            with patch.object(Config, 'FLASK_SECRET_KEY', 'my-production-secret'):
+                prod_config = get_config('production')
+                self.assertFalse(prod_config.DEBUG)
+                self.assertEqual(prod_config.LOG_LEVEL, 'WARNING')
+                
+    def test_09_production_tesseract_cmd_check(self):
+        """Test production config requires TESSERACT_CMD to be set."""
+        # 1. Test failure when TESSERACT_CMD is not set and falls back to 'tesseract'
+        with patch.dict(os.environ, {'FLASK_ENV': 'production', 'FLASK_SECRET_KEY': 'my-secret'}, clear=True):
+            with patch.object(Config, 'TESSERACT_CMD', 'tesseract'):
+                with self.assertRaisesRegex(Exception, 'TESSERACT_CMD environment variable must be set'):
+                    get_config('production')
+            
+# ------------------------------------------------------------------------------
 # --- EXECUTION ---
+# ------------------------------------------------------------------------------
 
 if __name__ == '__main__':
     # To run this file, execute: python test_ocr.py
