@@ -1,0 +1,61 @@
+
+# .github/workflows/python_ci.yml
+
+name: Python CI/CD
+
+# 1. Define when this workflow runs
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# 2. Define the jobs (tasks) to be executed
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    # Define strategy for running against multiple Python versions
+    strategy:
+      matrix:
+        python-version: [ '3.9', '3.11' ]
+
+    # Steps for the job
+    steps:
+      - uses: actions/checkout@v4
+        name: Checkout Code
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The OCR component (Tesseract) is often required even for utility imports
+      - name: Install Tesseract OCR Engine
+        run: sudo apt-get install -y tesseract-ocr
+        
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pytest
+          # Install all project dependencies
+          pip install -r requirements.txt
+
+      - name: Lint with Flake8
+        run: |
+          # stop the build if there are Python syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # exit-zero to show all warnings but not fail the CI
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+
+      - name: Run Unit Tests
+        env:
+          # Set the environment variable to ensure testing config is loaded
+          FLASK_ENV: testing 
+          # Mock secret key for test config
+          FLASK_SECRET_KEY: test_secret_key
+        run: |
+          # The -v flag gives verbose output for easier debugging
+          python test_ocr.py -v
